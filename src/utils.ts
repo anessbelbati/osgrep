@@ -6,7 +6,10 @@ export function computeBufferHash(buffer: Buffer): string {
   return createHash("sha256").update(buffer).digest("hex");
 }
 
-export function computeFileHash(filePath: string, readFileSyncFn: (p: string) => Buffer): string {
+export function computeFileHash(
+  filePath: string,
+  readFileSyncFn: (p: string) => Buffer,
+): string {
   const buffer = readFileSyncFn(filePath);
   return computeBufferHash(buffer);
 }
@@ -19,9 +22,7 @@ export function getGitRepoFiles(repoRoot: string): string[] {
   };
 
   // Tracked files
-  const tracked = run(["ls-files", "-z"])
-    .split("\u0000")
-    .filter(Boolean);
+  const tracked = run(["ls-files", "-z"]).split("\u0000").filter(Boolean);
 
   // Untracked but not ignored
   const untracked = run(["ls-files", "--others", "--exclude-standard", "-z"])
@@ -42,5 +43,3 @@ export function isIgnoredByGit(filePath: string, repoRoot: string): boolean {
     return false;
   }
 }
-
-

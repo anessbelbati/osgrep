@@ -5,7 +5,10 @@ import * as path from "path";
 import { Mixedbread } from "@mixedbread/sdk";
 import { isIgnoredByGit, getGitRepoFiles, computeBufferHash } from "./utils";
 
-async function listStoreFileHashes(client: Mixedbread, store: string): Promise<Map<string, string | undefined>> {
+async function listStoreFileHashes(
+  client: Mixedbread,
+  store: string,
+): Promise<Map<string, string | undefined>> {
   const byExternalId = new Map<string, string | undefined>();
   let after: string | null | undefined = undefined;
   do {
@@ -14,10 +17,13 @@ async function listStoreFileHashes(client: Mixedbread, store: string): Promise<M
       const externalId = f.external_id ?? undefined;
       if (!externalId) continue;
       const metadata = (f.metadata as any) || {};
-      const hash: string | undefined = typeof metadata?.hash === "string" ? metadata.hash : undefined;
+      const hash: string | undefined =
+        typeof metadata?.hash === "string" ? metadata.hash : undefined;
       byExternalId.set(externalId, hash);
     }
-    after = resp.pagination?.has_more ? resp.pagination?.last_cursor ?? undefined : undefined;
+    after = resp.pagination?.has_more
+      ? (resp.pagination?.last_cursor ?? undefined)
+      : undefined;
   } while (after);
   return byExternalId;
 }
@@ -59,7 +65,11 @@ async function uploadFile(
   );
 }
 
-async function initialSync(client: Mixedbread, store: string, repoRoot: string): Promise<void> {
+async function initialSync(
+  client: Mixedbread,
+  store: string,
+  repoRoot: string,
+): Promise<void> {
   const storeHashes = await listStoreFileHashes(client, store);
   const repoFiles = filterRepoFiles(getGitRepoFiles(repoRoot), repoRoot);
   for (const filePath of repoFiles) {
@@ -86,7 +96,11 @@ program
     ).version,
   )
   .option("--api-key <string>", "The API key to use", process.env.MXBAI_API_KEY)
-  .option("--store <string>", "The store to use", process.env.MXBAI_STORE || "mgrep");
+  .option(
+    "--store <string>",
+    "The store to use",
+    process.env.MXBAI_STORE || "mgrep",
+  );
 
 program
   .command("search", { isDefault: true })
@@ -154,9 +168,11 @@ program
           return;
         }
 
-        uploadFile(mixedbread, options.store, filePath, filename).catch((err) => {
-          console.error("Failed to upload changed file:", filePath, err);
-        });
+        uploadFile(mixedbread, options.store, filePath, filename).catch(
+          (err) => {
+            console.error("Failed to upload changed file:", filePath, err);
+          },
+        );
       });
     } catch (err) {
       console.error("Failed to start watcher:", err);
