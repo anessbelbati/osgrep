@@ -67,18 +67,29 @@ async function uploadFile(
     return false;
   }
   const hash = computeBufferHash(buffer);
-  await client.stores.files.upload(
-    store,
-    new File([buffer], fileName, { type: "text/plain" }),
-    {
+  try {
+    await client.stores.files.upload(store, fs.createReadStream(filePath), {
       external_id: filePath,
       overwrite: true,
       metadata: {
         path: filePath,
         hash,
       },
-    },
-  );
+    });
+  } catch (err) {
+    await client.stores.files.upload(
+      store,
+      new File([buffer], fileName, { type: "text/plain" }),
+      {
+        external_id: filePath,
+        overwrite: true,
+        metadata: {
+          path: filePath,
+          hash,
+        },
+      },
+    );
+  }
   return true;
 }
 
