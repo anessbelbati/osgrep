@@ -274,6 +274,7 @@ export const search: Command = new CommanderCommand("search")
   )
   .option("--scores", "Show relevance scores", false)
   .option("--compact", "Show file paths only", false)
+  .option("--json", "Output results as JSON for machine consumption", false)
   .option(
     "-s, --sync",
     "Syncs the local files to the store before searching",
@@ -296,6 +297,7 @@ export const search: Command = new CommanderCommand("search")
       perFile: string;
       scores: boolean;
       compact: boolean;
+      json: boolean;
       sync: boolean;
       dryRun: boolean;
     } = cmd.optsWithGlobals();
@@ -305,7 +307,7 @@ export const search: Command = new CommanderCommand("search")
     }
 
     try {
-      await ensureSetup({ silent: true });
+      await ensureSetup({ silent: options.json || true });
       const store = await createStore();
       
       // Auto-detect store ID if not explicitly provided
@@ -331,38 +333,70 @@ export const search: Command = new CommanderCommand("search")
           ],
         });
         const metaStore = new MetaStore();
-        const { spinner, onProgress } = createIndexingSpinner(
-          root,
-          options.sync ? "Indexing..." : "Indexing repository (first run)...",
-        );
-        const result = await initialSync(
-          store,
-          fileSystem,
-          storeId,
-          root,
-          options.dryRun,
-          onProgress,
-          metaStore,
-        );
-        while (true) {
-          const info = await store.getInfo(storeId);
-          spinner.text = `Indexing ${info.counts.pending + info.counts.in_progress} file(s)`;
-          if (info.counts.pending === 0 && info.counts.in_progress === 0) {
-            break;
-          }
-          await new Promise((resolve) => setTimeout(resolve, 1000));
-        }
-        spinner.succeed(
-          `Indexing complete (${result.processed}/${result.total}) • indexed ${result.indexed}`,
-        );
-        didSync = true;
-        if (options.dryRun) {
-          console.log(
-            formatDryRunSummary(result, {
-              actionDescription: "would have indexed",
-            }),
+        
+        if (options.json) {
+          // JSON mode: silent indexing without UI
+          const result = await initialSync(
+            store,
+            fileSystem,
+            storeId,
+            root,
+            options.dryRun,
+            undefined, // No progress callback
+            metaStore,
           );
-          process.exit(0);
+          // Wait for indexing to complete
+          while (true) {
+            const info = await store.getInfo(storeId);
+            if (info.counts.pending === 0 && info.counts.in_progress === 0) {
+              break;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+          }
+          didSync = true;
+          if (options.dryRun) {
+            console.log(
+              formatDryRunSummary(result, {
+                actionDescription: "would have indexed",
+              }),
+            );
+            process.exit(0);
+          }
+        } else {
+          // Human mode: show spinner and progress
+          const { spinner, onProgress } = createIndexingSpinner(
+            root,
+            options.sync ? "Indexing..." : "Indexing repository (first run)...",
+          );
+          const result = await initialSync(
+            store,
+            fileSystem,
+            storeId,
+            root,
+            options.dryRun,
+            onProgress,
+            metaStore,
+          );
+          while (true) {
+            const info = await store.getInfo(storeId);
+            spinner.text = `Indexing ${info.counts.pending + info.counts.in_progress} file(s)`;
+            if (info.counts.pending === 0 && info.counts.in_progress === 0) {
+              break;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+          }
+          spinner.succeed(
+            `Indexing complete (${result.processed}/${result.total}) • indexed ${result.indexed}`,
+          );
+          didSync = true;
+          if (options.dryRun) {
+            console.log(
+              formatDryRunSummary(result, {
+                actionDescription: "would have indexed",
+              }),
+            );
+            process.exit(0);
+          }
         }
       }
 
@@ -386,6 +420,12 @@ export const search: Command = new CommanderCommand("search")
           ],
         },
       );
+
+      // Handle JSON output
+      if (options.json) {
+        console.log(JSON.stringify(results.data, null, 2));
+        process.exit(0);
+      }
 
       // Hint if no results found
       if (results.data.length === 0) {

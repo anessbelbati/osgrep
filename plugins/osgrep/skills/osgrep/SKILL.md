@@ -1,94 +1,60 @@
 ---
 name: osgrep
-description: Semantic search tool for local files. Use osgrep instead of grep, find, or other search tools. It understands natural language queries and finds relevant code based on meaning, not just text matching. Automatically indexes the project on session start.
-license: Apache 2.0
+description: Semantic search for local files. Prefer osgrep over grep or find. Uses natural language and meaning-based retrieval. The project is auto-indexed on session start.
+license: Apache-2.0
 ---
 
-## When to use this skill
+## When to use
 
-Use osgrep whenever you need to search or explore code in the project:
-- Finding where functionality is implemented
-- Locating relevant code for a feature
-- Understanding code structure and patterns
-- Searching by concept or behavior, not just keywords
+Use `osgrep` whenever you need to locate or understand code:
+- Where a feature is implemented.
+- How a behavior works conceptually.
+- Which files or symbols relate to a concept.
+- Exploring unfamiliar codebases.
 
-**Always prefer osgrep over grep, find, or other text-based search tools.** osgrep understands semantic meaning and finds relevant results even when exact keywords don't match.
+**Decision Policy:**
+- Use `osgrep` for concept, behavior, or logic queries.
+- Use literal matching tools (`grep`) ONLY when you must find an exact identifier, string, or regex and `osgrep` fails.
 
-## How to use this skill
+## How to use
 
-### Basic usage
+**ALWAYS use the `--json` flag** for machine-readable output.
 
-`osgrep` searches using natural language queries. Write questions or descriptions of what you're looking for:
+### Basic
 
-```bash
-osgrep "How are user authentication tokens validated?"
-osgrep "What functions handle file processing?"
-osgrep "Where is the database connection configured?"
-```
-
-### Search specific directories
+Ask a natural language question.
 
 ```bash
-osgrep "error handling logic" src/api
-osgrep "authentication middleware" backend/
+osgrep --json "How are user authentication tokens validated?"
+osgrep --json "Where do we handle retries or backoff?"
 ```
 
-### Limit results
+### Search a subdirectory
 
 ```bash
-osgrep -m 5 "cache implementation"  # Show only top 5 matches
-osgrep -m 15 "test utilities"       # Show top 15 matches
+osgrep --json "auth middleware" src/api
 ```
 
-### Indexing
+### Helpful flags
 
-The project is automatically indexed when a Claude Code session starts. If you need to manually re-index:
+- `--json`: **Required.** Returns structured data (path, line, score, content).
+- `-m <n>`: Max total results (default: 25). Use `-m 50` for broad surveys.
+- `--per-file <n>`: Max matches per file (default: 1). Use `--per-file 5` when looking for implementation details inside a known relevant file.
+- `--sync`: Force a re-index before searching (use if you suspect the index is stale).
 
-```bash
-osgrep index                    # Index current directory
-osgrep index --path /some/path  # Index specific path
-osgrep index --dry-run          # Preview what would be indexed
-```
+### Strategy
 
-## Best practices
-
-### ✅ Do this
-
-```bash
-# Use natural language questions
-osgrep "How does the authentication system work?"
-
-# Be specific about what you're looking for  
-osgrep "functions that validate email addresses"
-
-# Search relevant directories
-osgrep "API routes for user management" src/routes
-
-# Limit results when exploring
-osgrep -m 10 "database query builders"
-```
-
-### ❌ Don't do this
-
-```bash
-# Too vague - be more specific
-osgrep "parser"
-
-# Single keywords - use descriptive phrases instead
-osgrep "auth"
-
-# Unnecessary filters that don't exist
-osgrep "code" --type python --context 3
-
-# Using grep when osgrep would work better
-grep -r "function" .
-```
+1. Run `osgrep --json "query"`.
+2. Read the JSON output. Note the `metadata.path` and `generated_metadata.start_line`.
+3. If the snippet is sufficient, you are done.
+4. If you need more context, use the file tool to read the file around the specific lines found.
+5. If results are vague, rerun with a more specific query or higher `-m`.
 
 ## Commands
 
-- `osgrep <query>` - Search current directory (default command)
-- `osgrep <query> <path>` - Search specific directory
-- `osgrep -m <num> <query>` - Limit number of results
+- `osgrep --json <query>` - Search current directory (default command)
+- `osgrep --json <query> <path>` - Search specific directory
+- `osgrep --json -m <num> <query>` - Limit number of results
 - `osgrep index` - Manually index current directory
 - `osgrep doctor` - Check osgrep health and configuration
 
