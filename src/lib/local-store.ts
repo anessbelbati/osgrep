@@ -37,9 +37,18 @@ interface VectorRecord {
 }
 
 import { type Chunk, TreeSitterChunker } from "./chunker";
+import { LRUCache } from "./lru";
 
 const PROFILE_ENABLED =
   process.env.OSGREP_PROFILE === "1" || process.env.OSGREP_PROFILE === "true";
+const VECTOR_CACHE_MAX = Number.parseInt(
+  process.env.OSGREP_VECTOR_CACHE_MAX || "10000",
+  10,
+);
+const WORKER_TIMEOUT_MS = Number.parseInt(
+  process.env.OSGREP_WORKER_TIMEOUT_MS || "60000",
+  10,
+);
 
 export interface LocalStoreProfile {
   listFilesMs: number;
@@ -55,13 +64,14 @@ export interface LocalStoreProfile {
 export class LocalStore implements Store {
   private db: lancedb.Connection | null = null;
   private worker!: Worker;
-  private vectorCache = new Map<string, number[]>();
+  private vectorCache = new LRUCache<string, number[]>(VECTOR_CACHE_MAX);
   private pendingRequests = new Map<
     string,
     {
       resolve: (v: any) => void;
       reject: (e: any) => void;
       payload: WorkerRequest;
+      timeoutId?: NodeJS.Timeout;
     }
   >();
   private restartInFlight: Promise<void> | null = null;
@@ -109,11 +119,17 @@ export class LocalStore implements Store {
   private initializeWorker() {
     const { workerPath, execArgv } = this.getWorkerConfig();
     this.worker = new Worker(workerPath, { execArgv });
+
     this.worker.on("message", (message) => {
       const { id, vector, vectors, scores, error, memory } = message;
       const pending = this.pendingRequests.get(id);
 
       if (pending) {
+        // Clear timeout if set
+        if (pending.timeoutId) {
+          clearTimeout(pending.timeoutId);
+        }
+
         if (error) {
           pending.reject(new Error(error));
         } else if (vectors !== undefined) {
@@ -133,6 +149,32 @@ export class LocalStore implements Store {
         void this.restartWorker("memory limit exceeded");
       }
     });
+
+    // Handle worker errors
+    this.worker.on("error", (err) => {
+      console.error("Worker error:", err);
+      this.rejectAllPending(new Error(`Worker error: ${err.message}`));
+      void this.restartWorker("worker error");
+    });
+
+    // Handle worker exit
+    this.worker.on("exit", (code) => {
+      if (code !== 0) {
+        console.error(`Worker exited with code ${code}`);
+        this.rejectAllPending(new Error(`Worker exited with code ${code}`));
+        void this.restartWorker("worker exit");
+      }
+    });
+  }
+
+  private rejectAllPending(error: Error) {
+    for (const pending of this.pendingRequests.values()) {
+      if (pending.timeoutId) {
+        clearTimeout(pending.timeoutId);
+      }
+      pending.reject(error);
+    }
+    this.pendingRequests.clear();
   }
 
   private async restartWorker(reason?: string) {
@@ -143,6 +185,13 @@ export class LocalStore implements Store {
     const pending = Array.from(this.pendingRequests.entries()).map(
       ([id, value]) => ({ id, ...value }),
     );
+
+    // Clear timeouts for all pending requests
+    for (const request of pending) {
+      if (request.timeoutId) {
+        clearTimeout(request.timeoutId);
+      }
+    }
     this.pendingRequests.clear();
 
     this.restartInFlight = (async () => {
@@ -153,11 +202,15 @@ export class LocalStore implements Store {
       }
       this.initializeWorker();
       if (reason) {
-        console.warn(`Worker restarted due to ${reason}, replaying in-flight jobs (${pending.length})`);
+        console.warn(
+          `Worker restarted due to ${reason}, replaying in-flight jobs (${pending.length})`,
+        );
       }
       // Re-dispatch anything that was in flight so callers don't error out
       for (const request of pending) {
-        this.pendingRequests.set(request.id, request);
+        // Remove timeoutId from the stored request before re-adding
+        const { id: reqId, timeoutId, ...cleanRequest } = request;
+        this.pendingRequests.set(reqId, cleanRequest);
         this.worker.postMessage(request.payload);
       }
     })();
@@ -191,7 +244,19 @@ export class LocalStore implements Store {
     return new Promise((resolve, reject) => {
       const id = uuidv4();
       const payload = buildPayload(id);
-      this.pendingRequests.set(id, { resolve, reject, payload });
+
+      // Set up timeout
+      const timeoutId = setTimeout(() => {
+        const pending = this.pendingRequests.get(id);
+        if (pending) {
+          this.pendingRequests.delete(id);
+          reject(
+            new Error(`Worker request timed out after ${WORKER_TIMEOUT_MS}ms`),
+          );
+        }
+      }, WORKER_TIMEOUT_MS);
+
+      this.pendingRequests.set(id, { resolve, reject, payload, timeoutId });
       this.worker.postMessage(payload);
     });
   }
@@ -808,16 +873,6 @@ export class LocalStore implements Store {
       .sort((a, b) => (rrfScores.get(b) || 0) - (rrfScores.get(a) || 0))
       .slice(0, candidateLimit) // Take top 50 combined
       .map((key) => contentMap.get(key));
-
-    if (query === "CLI entry point") {
-      console.log("DEBUG: Candidates for 'CLI entry point':");
-      for (let i = 0; i < candidates.length; i++) {
-        const c = candidates[i];
-        console.log(
-          `${i + 1}. ${c.path} (Score: ${rrfScores.get(`${c.path}:${c.start_line}`)})`,
-        );
-      }
-    }
 
     if (candidates.length === 0) {
       return { data: [] };

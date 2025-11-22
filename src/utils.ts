@@ -22,12 +22,52 @@ const SKIP_META_SAVE =
 // Only index these extensions to avoid binary noise and improve relevance.
 const INDEXABLE_EXTENSIONS = new Set([
   // Code
-  ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".rs", ".java", ".c", ".cpp", ".h", ".hpp",
-  ".rb", ".php", ".cs", ".swift", ".kt", ".scala", ".lua", ".sh", ".sql", ".html", ".css",
-  ".dart", ".el", ".clj", ".ex", ".exs", ".m", ".mm", ".f90", ".f95",
+  ".ts",
+  ".tsx",
+  ".js",
+  ".jsx",
+  ".py",
+  ".go",
+  ".rs",
+  ".java",
+  ".c",
+  ".cpp",
+  ".h",
+  ".hpp",
+  ".rb",
+  ".php",
+  ".cs",
+  ".swift",
+  ".kt",
+  ".scala",
+  ".lua",
+  ".sh",
+  ".sql",
+  ".html",
+  ".css",
+  ".dart",
+  ".el",
+  ".clj",
+  ".ex",
+  ".exs",
+  ".m",
+  ".mm",
+  ".f90",
+  ".f95",
   // Config / Data / Docs
-  ".json", ".yaml", ".yml", ".toml", ".xml", ".md", ".mdx", ".txt", ".env", ".gitignore",
-  ".dockerfile", "dockerfile", "makefile"
+  ".json",
+  ".yaml",
+  ".yml",
+  ".toml",
+  ".xml",
+  ".md",
+  ".mdx",
+  ".txt",
+  ".env",
+  ".gitignore",
+  ".dockerfile",
+  "dockerfile",
+  "makefile",
 ]);
 
 const MAX_FILE_SIZE_BYTES = 1024 * 1024; // 1MB limit for semantic indexing
@@ -76,6 +116,7 @@ function isIndexableFile(filePath: string): boolean {
 export class MetaStore {
   private data: Record<string, string> = {};
   private loaded = false;
+  private saveQueue: Promise<void> = Promise.resolve();
 
   async load() {
     if (this.loaded) return;
@@ -89,8 +130,22 @@ export class MetaStore {
   }
 
   async save() {
-    await fs.promises.mkdir(path.dirname(META_FILE), { recursive: true });
-    await fs.promises.writeFile(META_FILE, JSON.stringify(this.data, null, 2));
+    // Serialize saves to avoid concurrent writes that could corrupt the file
+    this.saveQueue = this.saveQueue
+      .then(async () => {
+        await fs.promises.mkdir(path.dirname(META_FILE), { recursive: true });
+        await fs.promises.writeFile(
+          META_FILE,
+          JSON.stringify(this.data, null, 2),
+        );
+      })
+      .catch((err) => {
+        // Log error but allow queue to continue
+        console.error("MetaStore save failed:", err);
+        throw err;
+      });
+
+    return this.saveQueue;
   }
 
   get(filePath: string): string | undefined {
@@ -119,13 +174,61 @@ export function computeFileHash(
 }
 
 export function isDevelopment(): boolean {
+  // Return false when running from within node_modules
   if (__dirname.includes("node_modules")) {
     return false;
   }
+  // Return true only when NODE_ENV is explicitly "development"
   if (process.env.NODE_ENV === "development") {
     return true;
   }
-  return true;
+  // Otherwise return false (production/other environments)
+  return false;
+}
+
+// Self-check for isDevelopment logic
+if (process.env.OSGREP_RUN_SELFCHECK === "true") {
+  const originalEnv = process.env.NODE_ENV;
+
+  // Test 1: node_modules always returns false
+  if (!__dirname.includes("node_modules")) {
+    // Can't test node_modules case from outside node_modules
+  } else if (isDevelopment() !== false) {
+    console.error(
+      "[SELFCHECK FAILED] isDevelopment() should return false in node_modules",
+    );
+    process.exit(1);
+  }
+
+  // Test 2: NODE_ENV=development returns true
+  process.env.NODE_ENV = "development";
+  if (isDevelopment() !== true) {
+    console.error(
+      "[SELFCHECK FAILED] isDevelopment() should return true when NODE_ENV=development",
+    );
+    process.exit(1);
+  }
+
+  // Test 3: Other values return false
+  process.env.NODE_ENV = "production";
+  if (isDevelopment() !== false) {
+    console.error(
+      "[SELFCHECK FAILED] isDevelopment() should return false when NODE_ENV=production",
+    );
+    process.exit(1);
+  }
+
+  process.env.NODE_ENV = undefined;
+  if (isDevelopment() !== false) {
+    console.error(
+      "[SELFCHECK FAILED] isDevelopment() should return false when NODE_ENV is unset",
+    );
+    process.exit(1);
+  }
+
+  // Restore
+  process.env.NODE_ENV = originalEnv;
+  console.log("[SELFCHECK PASSED] isDevelopment() logic is correct");
 }
 
 export async function listStoreFileHashes(
@@ -242,7 +345,7 @@ export async function initialSync(
   let storeHashes: Map<string, string | undefined> = new Map();
   let initialDbCount = 0;
   const storeScanStart = PROFILE_ENABLED ? now() : null;
-  
+
   try {
     for await (const file of store.listFiles(storeId)) {
       const externalId = file.external_id ?? undefined;
@@ -262,9 +365,10 @@ export async function initialSync(
   } catch (_err) {
     storeIsEmpty = true;
   }
-  
+
   if (PROFILE_ENABLED && storeScanStart && profile) {
-    profile.sections.storeScan = (profile.sections.storeScan ?? 0) + toMs(storeScanStart);
+    profile.sections.storeScan =
+      (profile.sections.storeScan ?? 0) + toMs(storeScanStart);
   }
 
   if (metaStore && storeHashes.size === 0) {
@@ -274,17 +378,17 @@ export async function initialSync(
   // 2. Walk file system and apply the VELVET ROPE filter
   const fileWalkStart = PROFILE_ENABLED ? now() : null;
   const allFiles = Array.from(fileSystem.getFiles(repoRoot));
-  
+
   if (PROFILE_ENABLED && fileWalkStart && profile) {
-    profile.sections.fileWalk = (profile.sections.fileWalk ?? 0) + toMs(fileWalkStart);
+    profile.sections.fileWalk =
+      (profile.sections.fileWalk ?? 0) + toMs(fileWalkStart);
   }
 
   const repoFiles = allFiles.filter(
-    (filePath) => 
-      !fileSystem.isIgnored(filePath, repoRoot) && 
-      isIndexableFile(filePath) // <--- New semantic noise filter
+    (filePath) =>
+      !fileSystem.isIgnored(filePath, repoRoot) && isIndexableFile(filePath), // <--- New semantic noise filter
   );
-  
+
   const diskPaths = new Set(repoFiles);
 
   // 3. Delete stale files (files in DB but not on disk)
@@ -311,7 +415,8 @@ export async function initialSync(
       }
     }
     if (PROFILE_ENABLED && staleStart && profile) {
-      profile.sections.staleDeletes = (profile.sections.staleDeletes ?? 0) + toMs(staleStart);
+      profile.sections.staleDeletes =
+        (profile.sections.staleDeletes ?? 0) + toMs(staleStart);
     }
   }
 
@@ -322,7 +427,7 @@ export async function initialSync(
   const total = repoFiles.length;
   let processed = 0;
   let indexed = 0;
-  
+
   if (PROFILE_ENABLED && profile) {
     profile.processed = total;
   }
@@ -348,9 +453,10 @@ export async function initialSync(
             const buffer = await fs.promises.readFile(filePath);
             const hashStart = PROFILE_ENABLED ? now() : null;
             const hash = computeBufferHash(buffer);
-            
+
             if (PROFILE_ENABLED && hashStart && profile) {
-              profile.sections.hash = (profile.sections.hash ?? 0) + toMs(hashStart);
+              profile.sections.hash =
+                (profile.sections.hash ?? 0) + toMs(hashStart);
             }
 
             let existingHash: string | undefined;
@@ -361,7 +467,8 @@ export async function initialSync(
             }
 
             processed += 1;
-            const shouldIndex = storeIsEmpty || !existingHash || existingHash !== hash;
+            const shouldIndex =
+              storeIsEmpty || !existingHash || existingHash !== hash;
 
             if (dryRun && shouldIndex) {
               // console.log("Dry run: would have indexed", filePath); // Keep output clean
@@ -383,12 +490,15 @@ export async function initialSync(
                 // Periodic meta save
                 if (metaStore && !SKIP_META_SAVE && indexed % 25 === 0) {
                   const saveStart = PROFILE_ENABLED ? now() : null;
-                  metaStore.save().catch((err) =>
-                    console.error("Failed to auto-save meta:", err),
-                  );
+                  metaStore
+                    .save()
+                    .catch((err) =>
+                      console.error("Failed to auto-save meta:", err),
+                    );
                   if (PROFILE_ENABLED && saveStart && profile) {
                     profile.metaSaveCount += 1;
-                    profile.sections.metaSave = (profile.sections.metaSave ?? 0) + toMs(saveStart);
+                    profile.sections.metaSave =
+                      (profile.sections.metaSave ?? 0) + toMs(saveStart);
                   }
                 }
               }
@@ -397,8 +507,8 @@ export async function initialSync(
           } catch (_err) {
             onProgress?.({ processed, indexed, total, filePath });
           }
-        })
-      )
+        }),
+      ),
     );
 
     // --- THE THERMOSTAT ---
@@ -408,20 +518,19 @@ export async function initialSync(
     const memUsageMB = process.memoryUsage().rss / 1024 / 1024;
 
     // Case 1: Getting too hot (Memory spike or very slow processing)
-    if (memUsageMB > 1500) { 
-       // If RSS > 1.5GB, clamp down hard and sleep
-       currentConcurrency = Math.max(MIN_CONCURRENCY, currentConcurrency - 2);
-       // Force a pause to let GC run/system breathe
-       await new Promise(resolve => setTimeout(resolve, 1000)); 
-    } 
-    else if (timePerFile > 300) { 
-       // Taking >300ms per file means embedding/hashing is struggling
-       currentConcurrency = Math.max(MIN_CONCURRENCY, currentConcurrency - 1);
-    } 
+    if (memUsageMB > 1500) {
+      // If RSS > 1.5GB, clamp down hard and sleep
+      currentConcurrency = Math.max(MIN_CONCURRENCY, currentConcurrency - 2);
+      // Force a pause to let GC run/system breathe
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    } else if (timePerFile > 300) {
+      // Taking >300ms per file means embedding/hashing is struggling
+      currentConcurrency = Math.max(MIN_CONCURRENCY, currentConcurrency - 1);
+    }
     // Case 2: Cruising comfortably
     else if (timePerFile < 80 && currentConcurrency < MAX_CONCURRENCY) {
-       // If we are fast (<80ms/file), we can afford more concurrency
-       currentConcurrency++;
+      // If we are fast (<80ms/file), we can afford more concurrency
+      currentConcurrency++;
     }
   }
 
