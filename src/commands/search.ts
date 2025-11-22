@@ -1,4 +1,4 @@
-import { extname, join, relative, normalize } from "node:path";
+import { extname, join, normalize, relative } from "node:path";
 import { highlight } from "cli-highlight";
 import type { Command } from "commander";
 import { Command as CommanderCommand } from "commander";
@@ -176,7 +176,10 @@ function formatSearchResults(
       output += `${snippet}${scoreDisplay}\n`;
 
       // Visual separator between chunks in same file if needed
-      if (shownChunks.length > 1 && chunk !== shownChunks[shownChunks.length - 1]) {
+      if (
+        shownChunks.length > 1 &&
+        chunk !== shownChunks[shownChunks.length - 1]
+      ) {
         output += style.dim("      ...\n");
       }
     }
@@ -200,11 +203,7 @@ export const search: Command = new CommanderCommand("search")
     "25",
   )
   .option("-c, --content", "Show full chunk content instead of snippets", false)
-  .option(
-    "--per-file <n>",
-    "Number of matches to show per file",
-    "1",
-  )
+  .option("--per-file <n>", "Number of matches to show per file", "1")
   .option("--scores", "Show relevance scores", false)
   .option("--compact", "Show file paths only", false)
   .option(
