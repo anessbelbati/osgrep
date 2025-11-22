@@ -4,11 +4,11 @@
   "author": "Ryandonofrio <ryandonofrio@gmail.com>",
   "homepage": "https://www.ryan.donofr.io",
   "bugs": {
-    "url": "https://github.com/ryandonofrio/osgrep/issues"
+    "url": "https://github.com/Ryandonofrio3/osgrep/issues"
   },
   "repository": {
     "type": "git",
-    "url": "github:ryandonofrio/osgrep"
+    "url": "https://github.com/Ryandonofrio3/osgrep.git"
   },
   "main": "index.js",
   "bin": {
