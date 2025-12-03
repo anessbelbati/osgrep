@@ -1,6 +1,6 @@
 import { workerManager } from "../workers/worker-manager";
 import { CONFIG } from "../../config";
-import { maxSim, cosineSim } from "./colbert-math";
+import { maxSim } from "./colbert-math";
 import type {
     SearchFilter,
     SearchResponse,
@@ -11,12 +11,12 @@ import type {
 import { VectorDB } from "../store/vector-db";
 
 export class Searcher {
-    private readonly queryPrefix = CONFIG.QUERY_PREFIX;
-    private readonly colbertDim = CONFIG.COLBERT_DIM;
+    // private readonly queryPrefix = CONFIG.QUERY_PREFIX;
+    // private readonly colbertDim = CONFIG.COLBERT_DIM;
 
     constructor(private db: VectorDB) { }
 
-    private mapRecordToChunk(record: VectorRecord, score: number): ChunkType {
+    private mapRecordToChunk(record: Partial<VectorRecord>, score: number): ChunkType {
         const fullText = `${record.context_prev || ""}${record.content || ""}${record.context_next || ""} `;
         const startLine = record.start_line || 0;
         const endLine = record.end_line || startLine;
@@ -26,7 +26,7 @@ export class Searcher {
             text: fullText,
             score,
             metadata: {
-                path: record.path,
+                path: record.path || "",
                 hash: record.hash || "",
                 is_anchor: !!record.is_anchor,
             },
@@ -38,14 +38,14 @@ export class Searcher {
         };
     }
 
-    private applyStructureBoost(record: VectorRecord, score: number): number {
+    private applyStructureBoost(record: Partial<VectorRecord>, score: number): number {
         let adjusted = score;
         const chunkType = record.chunk_type || "";
         const boosted = ["function", "class", "method", "interface", "type_alias"];
         if (boosted.includes(chunkType)) {
             adjusted *= 1.25;
         }
-        const pathStr = record.path.toLowerCase();
+        const pathStr = (record.path || "").toLowerCase();
         if (
             pathStr.includes(".test.") ||
             pathStr.includes(".spec.") ||
@@ -73,26 +73,22 @@ export class Searcher {
         _search_options?: { rerank?: boolean },
         _filters?: SearchFilter,
     ): Promise<SearchResponse> {
-        let table;
-        try {
-            table = await this.db.ensureTable(storeId);
-        } catch {
-            return { data: [] };
-        }
-
         const finalLimit = top_k ?? 10;
 
-        // 1. Dense + ColBERT query encoding
-        const queryEnc = await workerManager.encodeQuery(this.queryPrefix + query);
-        const queryVector = queryEnc.dense;
-        const doRerank = _search_options?.rerank !== false;
+        // 1. Encode Query (Dense + ColBERT)
+        const { dense: queryVector, colbert: queryMatrixRaw, colbertDim } =
+            await workerManager.encodeQuery(query);
 
-        if (queryEnc.colbertDim && queryEnc.colbertDim !== this.colbertDim) {
+        if (colbertDim !== CONFIG.COLBERT_DIM) {
             console.warn(
-                `[osgrep] Warning: Model dimension mismatch.Config: ${this.colbertDim}, Model: ${queryEnc.colbertDim}. Scores may be inaccurate.`,
+                `[Searcher] Warning: Query ColBERT dim (${colbertDim}) != Config (${CONFIG.COLBERT_DIM})`,
             );
         }
 
+        // Optimization: Convert query matrix to Float32Array[] once for simsimd
+        const queryMatrix = queryMatrixRaw.map(v => new Float32Array(v));
+
+        // 2. Fetch Candidates (Hybrid: Vector + FTS)
         // Optional path filter support
         const allFilters = Array.isArray((_filters as { all?: unknown })?.all)
             ? ((_filters as { all?: unknown }).all as Record<string, unknown>[])
@@ -107,85 +103,67 @@ export class Searcher {
             ? `path LIKE '${pathPrefix.replace(/'/g, "''").replace(/\\/g, "\\\\")}%'`
             : undefined;
 
-        // 2. HYBRID RECALL
-        const docClause =
-            "(path LIKE '%.md' OR path LIKE '%.mdx' OR path LIKE '%.txt' OR path LIKE '%.json')";
-        const codeClause = `NOT ${docClause}`;
+        // We fetch more candidates for reranking (e.g. 150 from each source)
+        const PRE_RERANK_K = Math.max(finalLimit * 3, 150);
 
-        // A. Search Code
-        const codeQuery = table
-            .search(queryVector)
-            .where(whereClause ? `${whereClause} AND ${codeClause}` : codeClause)
-            .limit(100);
-
-        // B. Search Docs
-        const docQuery = table
-            .search(queryVector)
-            .where(whereClause ? `${whereClause} AND ${docClause}` : docClause)
-            .limit(100);
-
-        // C. FTS Search
-        let ftsPromise: Promise<VectorRecord[]> = Promise.resolve([]);
+        let table;
         try {
-            let ftsQuery = table.search(query);
+            table = await this.db.ensureTable(storeId);
+        } catch {
+            return { data: [] };
+        }
+
+        let vectorQuery = table.vectorSearch(queryVector).limit(PRE_RERANK_K);
+        if (whereClause) {
+            vectorQuery = vectorQuery.where(whereClause);
+        }
+        const vectorResults = (await vectorQuery.toArray()) as VectorRecord[];
+
+        let ftsResults: VectorRecord[] = [];
+        try {
+            let ftsQuery = table
+                .search(query)
+                .limit(PRE_RERANK_K);
             if (whereClause) {
                 ftsQuery = ftsQuery.where(whereClause);
             }
-            ftsPromise = (
-                ftsQuery.limit(100).toArray() as Promise<VectorRecord[]>
-            ).catch((e) => {
-                console.warn(
-                    "FTS search failed (index missing?):",
-                    e instanceof Error ? e.message : String(e),
-                );
-                return [];
-            });
+            ftsResults = (await ftsQuery.toArray()) as VectorRecord[];
         } catch (e) {
-            console.warn("FTS search failed, falling back to pure vector search", e);
+            // FTS might fail if index doesn't exist or query is weird
+            // console.warn("FTS search failed, falling back to vector only", e);
         }
 
-        const [codeResults, docResults, ftsResults] = await Promise.all([
-            codeQuery.toArray() as Promise<VectorRecord[]>,
-            docQuery.toArray() as Promise<VectorRecord[]>,
-            ftsPromise,
-        ]);
+        // Merge results (deduplicate by path + chunk_index)
+        const seen = new Set<string>();
+        const candidates: VectorRecord[] = [];
 
-        const denseCandidates = [...codeResults, ...docResults, ...ftsResults];
-
-        // Deduplicate
-        const candidatesMap = new Map<string, VectorRecord>();
-        denseCandidates.forEach((r) => {
-            const key = `${r.path}:${r.start_line}`;
-            if (!candidatesMap.has(key)) candidatesMap.set(key, r);
-        });
-        const candidates = Array.from(candidatesMap.values());
+        for (const r of [...vectorResults, ...ftsResults]) {
+            const key = `${r.path}:${r.chunk_index}`;
+            if (!seen.has(key)) {
+                seen.add(key);
+                candidates.push(r);
+            }
+        }
 
         if (candidates.length === 0) {
             return { data: [] };
         }
 
-        // 3. Rerank
-        const queryMatrix = doRerank ? queryEnc.colbert : [];
-
-
-
-        const reranked = candidates.map((doc) => {
-            const denseVec = Array.isArray(doc.vector)
-                ? (doc.vector as number[])
-                : [];
-            let score = cosineSim(queryVector, denseVec);
+        // 3. Rerank (ColBERT MaxSim)
+        // We rerank ALL fetched candidates (up to ~300)
+        const scored = candidates.map((doc) => {
+            let score = 0;
 
             if (
-                doRerank &&
                 doc.colbert &&
-                !(Array.isArray(doc.colbert) && doc.colbert.length === 0) &&
+                (Buffer.isBuffer(doc.colbert) || (doc.colbert as any) instanceof Uint8Array) &&
                 queryMatrix.length > 0
             ) {
                 const scale =
                     typeof doc.colbert_scale === "number" ? doc.colbert_scale : 1.0;
                 let int8: Int8Array | null = null;
-                if (Buffer.isBuffer(doc.colbert)) {
-                    const buffer = doc.colbert as Buffer;
+                if (Buffer.isBuffer(doc.colbert) || (doc.colbert as any) instanceof Uint8Array) {
+                    const buffer = doc.colbert as Uint8Array;
                     int8 = new Int8Array(
                         buffer.buffer,
                         buffer.byteOffset,
@@ -196,40 +174,62 @@ export class Searcher {
                 }
 
                 if (int8) {
-                    const docMatrix: number[][] = [];
-                    const stride = this.colbertDim;
+                    // Reconstruct document matrix
+                    // int8 is [seq_len * colbertDim]
+                    // We know colbertDim (48)
+                    // But we don't know seq_len explicitly, we derive it.
+                    // Actually, we should use colbertDim from config or query?
+                    // Ideally from config, but let's use the query's dim to match.
+                    const dim = colbertDim;
+                    const seqLen = int8.length / dim;
 
-                    for (let i = 0; i < int8.length; i += stride) {
-                        const row: number[] = [];
-                        let isPadding = true;
-
-                        for (let k = 0; k < stride; k++) {
-                            if (i + k >= int8.length) break;
-                            const val = (int8[i + k] / 127) * scale;
-                            if (val !== 0) isPadding = false;
-                            row.push(val);
-                        }
-                        if (!isPadding && row.length === stride) {
+                    if (int8.length % dim !== 0) {
+                        // console.warn(
+                        //   `[Searcher] Chunk ${doc.path}:${doc.chunk_index} colbert buffer length ${int8.length} not divisible by ${dim}`,
+                        // );
+                    } else {
+                        const docMatrix: Float32Array[] = [];
+                        for (let i = 0; i < seqLen; i++) {
+                            const start = i * dim;
+                            const row = new Float32Array(dim);
+                            for (let j = 0; j < dim; j++) {
+                                row[j] = (int8[start + j] * scale) / 127.0;
+                            }
                             docMatrix.push(row);
                         }
-                    }
 
-                    if (docMatrix.length > 0) {
                         score = maxSim(queryMatrix, docMatrix);
                     }
                 }
+            } else {
+                // Fallback score if no colbert data (shouldn't happen for indexed chunks)
+                // Maybe use vector distance? But we don't have it easily here normalized.
+                // Just 0.
             }
-
-            score = this.applyStructureBoost(doc, score);
 
             return { record: doc, score };
         });
 
+        // Apply structure boosting
+        const boosted = scored.map((item) => {
+            const boost = this.applyStructureBoost(item.record, item.score);
+            return { ...item, score: boost };
+        });
+
+        // Sort by score descending
+        boosted.sort((a, b) => b.score - a.score);
+
+        // Take top K
+        const finalResults = boosted.slice(0, finalLimit).map((item) => ({
+            ...item.record,
+            _score: item.score,
+            // Remove heavy fields from response
+            vector: undefined,
+            colbert: undefined,
+        }));
+
         return {
-            data: reranked
-                .sort((a, b) => b.score - a.score)
-                .slice(0, finalLimit)
-                .map((x) => this.mapRecordToChunk(x.record, x.score)),
+            data: finalResults.map((r) => this.mapRecordToChunk(r, r._score || 0)),
         };
     }
 }

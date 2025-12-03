@@ -1,711 +1,494 @@
-// Reduce worker pool fan-out during eval to avoid ONNX concurrency issues
 process.env.OSGREP_WORKER_COUNT ??= "1";
 
+import { performance } from "node:perf_hooks";
 import { LocalStore } from "./lib/store/local-store";
-
 import type { SearchResponse } from "./lib/store/store";
 import { getAutoStoreId } from "./lib/store/store-utils";
 
 export type EvalCase = {
+  category: string;
   query: string;
-  expectedPath: string;
-  avoidPath?: string; // <--- New field: If this ranks HIGHER than expected, it's a fail.
+  expected: string[];
+  avoid?: string[];
   note?: string;
 };
 
 export type EvalResult = {
+  category: string;
+  query: string;
+  note?: string;
+  pathHint: string;
   rr: number;
   found: boolean;
   recall: number;
-  path: string;
-  query: string;
-  note?: string;
   timeMs: number;
 };
 
-export const cases: EvalCase[] = [
-  // --- Core Architecture & Data Flow ---
+const cases: EvalCase[] = [
+  // --- Search + ranking ---
   {
-    query: "Where do we compute reranker scores?",
-    expectedPath: "src/lib/local-store.ts",
-    note: "Rerank integration and scoring blend.",
+    category: "Search + ranking",
+    query: "How does osgrep blend dense, doc, and fts results?",
+    expected: ["src/lib/search/searcher.ts"],
+    note: "Hybrid retrieval merges code/doc vector results with FTS before rerank.",
   },
   {
-    query: "Which model generates embeddings?",
-    expectedPath: "src/lib/worker.ts",
-    note: "Embedding worker pipeline selection.",
+    category: "Search + ranking",
+    query: "Where is ColBERT maxSim scoring implemented?",
+    expected: ["src/lib/search/colbert-math.ts", "src/lib/search/searcher.ts"],
+    note: "ColBERT maxSim used for reranking hybrid candidates.",
   },
   {
-    query: "How is the LanceDB vector index created?",
-    expectedPath: "src/lib/local-store.ts",
-    note: "Vector index configuration.",
+    category: "Search + ranking",
+    query: "boost function/class chunks over tests",
+    expected: ["src/lib/search/searcher.ts"],
+    note: "applyStructureBoost favors definitions and downranks docs/tests.",
   },
   {
-    query: "turn the text into numbers",
-    expectedPath: "src/lib/worker.ts",
-    note: "Embedding function logic.",
+    category: "Search + ranking",
+    query: "scope search to a path prefix",
+    expected: ["src/lib/search/searcher.ts"],
+    note: "Path starts_with filter translated into a WHERE clause.",
   },
   {
-    query: "lancedb setup",
-    expectedPath: "src/lib/local-store.ts",
-    note: "DB path and table creation.",
+    category: "Search + ranking",
+    query: "What if full text search index is missing?",
+    expected: ["src/lib/search/searcher.ts"],
+    note: "FTS try/catch fallback to pure vector search with warnings.",
   },
   {
-    query: "worker thread management",
-    expectedPath: "src/lib/local-store.ts|src/lib/worker-manager.ts",
-    note: "Worker init/restart and messaging.",
-  },
-  { query: "createVectorIndex", expectedPath: "src/lib/local-store.ts" },
-  { query: "createFTSIndex", expectedPath: "src/lib/local-store.ts" },
-  {
-    query: "Represent this sentence for searching relevant passages",
-    expectedPath: "src/lib/local-store.ts",
-    note: "Query prefix for embeddings.",
-  },
-  { query: "VECTOR_DIMENSIONS", expectedPath: "src/lib/local-store.ts" },
-  {
-    query: "restart worker when memory is high",
-    expectedPath: "src/lib/local-store.ts|src/lib/worker-manager.ts",
-    note: "Worker resilience and restart logic.",
+    category: "Search + ranking",
+    query: "Warn when ColBERT dimensions differ from config",
+    expected: ["src/lib/search/searcher.ts"],
+    note: "colbertDim mismatch warning before scoring.",
   },
   {
-    query: "serialize embedding requests",
-    expectedPath: "src/lib/local-store.ts|src/lib/worker-manager.ts",
-    note: "embedQueue / enqueueEmbedding.",
+    category: "Search + ranking",
+    query: "Query prefix applied before encoding embeddings",
+    expected: ["src/lib/search/searcher.ts", "src/config.ts"],
+    note: "CONFIG.QUERY_PREFIX prepended to search strings.",
   },
   {
-    query: "RRF fusion",
-    expectedPath: "src/lib/local-store.ts",
-    note: "Vector + FTS combination.",
-  },
-  {
-    query: "reranker fallback",
-    expectedPath: "src/lib/local-store.ts",
-    note: "Graceful fallback when rerank fails.",
-  },
-  {
-    query: "model cache directory",
-    expectedPath: "src/lib/worker.ts",
-    note: "CACHE_DIR for transformers.",
-  },
-  {
-    query: "LanceDB table schema",
-    expectedPath: "src/lib/local-store.ts",
-    note: "Base schema row with seed data.",
-  },
-  {
-    query: "quantized models for embeddings",
-    expectedPath: "src/lib/worker.ts",
-    note: "q8 settings for pipelines.",
-  },
-  {
-    query: "text-classification reranker",
-    expectedPath: "src/lib/worker.ts",
-    note: "Rerank pipeline setup.",
-  },
-  {
-    query: "normalize embeddings",
-    expectedPath: "src/lib/worker.ts",
-    note: "Normalization in embed() call.",
-  },
-  {
-    query: "vector + keyword fusion candidates",
-    expectedPath: "src/lib/local-store.ts",
-    note: "candidateLimit and fusion scoring.",
-  },
-  {
-    query: "database path for embeddings",
-    expectedPath: "src/lib/local-store.ts",
-    note: ".osgrep/data DB_PATH.",
-  },
-  {
-    query: "rerank score blending",
-    expectedPath: "src/lib/local-store.ts",
-    note: "0.7 rerank + 0.3 RRF fusion.",
-  },
-  {
-    query: "onnx runtime threading",
-    expectedPath: "src/lib/worker.ts",
-    note: "ONNX backend configuration.",
-  },
-  {
-    query: "worker message handling",
-    expectedPath: "src/lib/worker.ts",
-    note: "Parent port message listener.",
-  },
-  {
-    query: "colbert stride logic",
-    expectedPath: "src/lib/local-store.ts",
-    note: "ColBERT matrix stride calculation.",
-  },
-  {
-    query: "structural boosting",
-    expectedPath: "src/lib/local-store.ts",
-    note: "applyStructureBoost function.",
-  },
-  {
-    query: "hybrid search implementation",
-    expectedPath: "src/lib/local-store.ts",
-    note: "The main search method logic.",
-  },
-  {
-    query: "maxSim scoring function",
-    expectedPath: "src/lib/colbert-math.ts|src/lib/local-store.ts",
-    note: "ColBERT scoring math.",
-  },
-  {
-    query: "worker shutdown",
-    expectedPath: "src/lib/worker-manager.ts",
-    note: "terminate() and cleanup.",
-  },
-  {
-    query: "embedding batch processing",
-    expectedPath: "src/lib/worker.ts",
-    note: "Batch handling in worker.",
+    category: "Search + ranking",
+    query: "Map LanceDB rows back into chunk metadata",
+    expected: ["src/lib/search/searcher.ts"],
+    note: "mapRecordToChunk stitches path/hash/line metadata.",
   },
 
-  // --- Indexing & Chunking ---
+  // --- Embeddings + workers ---
   {
-    query: "How are code chunks built with comments?",
-    expectedPath: "src/lib/chunker.ts",
-    note: "Comment-aware chunker and splitting.",
+    category: "Embeddings + workers",
+    query: "ONNX threading and worker thread count",
+    expected: ["src/lib/workers/worker.ts"],
+    note: "resolveThreadCount configures onnx intra/inter op threads.",
   },
   {
-    query: "chunking logic",
-    expectedPath: "src/lib/chunker.ts",
-    note: "Tree-sitter traversal and slicing.",
-  },
-  { query: "GRAMMARS_DIR", expectedPath: "src/lib/chunker.ts" },
-  { query: "OVERLAP_LINES", expectedPath: "src/lib/chunker.ts" },
-  {
-    query: "download tree-sitter grammars",
-    expectedPath: "src/lib/chunker.ts|src/lib/grammar-loader.ts",
-    note: "Grammar fetch and WASM loading.",
+    category: "Embeddings + workers",
+    query: "Quantized ColBERT reranker pipeline",
+    expected: ["src/lib/workers/worker.ts"],
+    note: "q8 ColBERT pipeline for late interaction rerank.",
   },
   {
-    query: "chunk splitting into overlapping windows",
-    expectedPath: "src/lib/chunker.ts",
-    note: "Sliding window splitIfTooBig.",
+    category: "Embeddings + workers",
+    query: "Dense embedding pooling and normalization",
+    expected: ["src/lib/workers/worker.ts"],
+    note: "toDenseVectors pulls CLS/padded vectors and normalizes length.",
   },
   {
-    query: "fallback chunking when parser fails",
-    expectedPath: "src/lib/chunker.ts",
-    note: "fallbackChunk logic.",
+    category: "Embeddings + workers",
+    query: "Pack ColBERT outputs into int8 with scale",
+    expected: ["src/lib/workers/worker.ts"],
+    note: "computeHybrid converts reranker outputs to int8 buffers + scale.",
   },
   {
-    query: "grammar download directory",
-    expectedPath: "src/lib/chunker.ts",
-    note: ".osgrep/grammars path handling.",
+    category: "Embeddings + workers",
+    query: "Encode query into dense vector and ColBERT matrix",
+    expected: ["src/lib/workers/worker.ts"],
+    note: "encodeQuery emits dense vector plus token matrix and dim.",
   },
   {
-    query: "anchor chunk creation",
-    expectedPath: "src/lib/chunker.ts",
-    note: "buildAnchorChunk function.",
+    category: "Embeddings + workers",
+    query: "Fallback to CPU if preferred device fails",
+    expected: ["src/lib/workers/worker.ts"],
+    note: "loadPipeline retries on cpu when device init fails.",
   },
   {
-    query: "formatting chunk text",
-    expectedPath: "src/lib/chunker.ts",
-    note: "formatChunkText function.",
+    category: "Embeddings + workers",
+    query: "Prefer local models cache before remote download",
+    expected: ["src/lib/workers/worker.ts"],
+    note: "env.allowRemoteModels toggled after checking local cache dir.",
   },
   {
-    query: "tree-sitter language loading",
-    expectedPath: "src/lib/chunker.ts",
-    note: "Loading WASM languages.",
+    category: "Embeddings + workers",
+    query: "Worker manager serializes requests through a queue",
+    expected: ["src/lib/workers/worker-manager.ts"],
+    note: "enqueue enforces one in-flight request at a time.",
   },
   {
-    query: "max lines per chunk",
-    expectedPath: "src/lib/chunker.ts",
-    note: "MAX_LINES constant.",
+    category: "Embeddings + workers",
+    query: "Recycle worker when memory or timeout is hit",
+    expected: ["src/lib/workers/worker-manager.ts"],
+    note: "Memory checks and timeout recycling prevent runaway RAM.",
   },
   {
-    query: "deduplicate identical chunks",
-    expectedPath: "src/lib/local-store.ts",
-    note: "Deduplication logic during indexing.",
+    category: "Embeddings + workers",
+    query: "Retry policy and timeout for embedding requests",
+    expected: ["src/lib/workers/worker-manager.ts"],
+    note: "attemptWorkerRequest retries with WORKER_TIMEOUT_MS guard.",
   },
   {
-    query: "indexing profile stats",
-    expectedPath: "src/lib/local-store.ts",
-    note: "LocalStoreProfile interface.",
+    category: "Embeddings + workers",
+    query: "Download all models via a background worker",
+    expected: ["src/lib/workers/download-worker.ts"],
+    note: "Model download worker runs transformers pipelines with progress.",
   },
   {
-    query: "handling large files during indexing",
-    expectedPath: "src/lib/chunker.ts",
-    note: "Splitting large files.",
-  },
-  {
-    query: "context window for chunks",
-    expectedPath: "src/lib/chunker.ts|src/lib/local-store.ts",
-    note: "Context prev/next fields.",
-  },
-  {
-    query: "supported languages for chunking",
-    expectedPath: "src/lib/chunker.ts",
-    note: "List of supported extensions.",
-  },
-  {
-    query: "chunk type detection",
-    expectedPath: "src/lib/chunker.ts",
-    note: "Identifying function/class/etc.",
-  },
-  {
-    query: "min chunk size",
-    expectedPath: "src/lib/chunker.ts",
-    note: "Minimum lines for a chunk.",
-  },
-  {
-    query: "loading wasm files",
-    expectedPath: "src/lib/chunker.ts",
-    note: "fs.readFile for wasm.",
+    category: "Embeddings + workers",
+    query: "Detect local models folder in project for dev",
+    expected: ["src/lib/workers/worker.ts"],
+    note: "PROJECT_ROOT models/ overrides cache for local testing.",
   },
 
-  // --- CLI Commands & Entry Points ---
+  // --- Indexing + chunking ---
   {
-    query: "search command implementation",
-    expectedPath: "src/commands/search.ts",
-    avoidPath: "src/index.ts",
-    note: "CLI search command body.",
+    category: "Indexing + chunking",
+    query: "Tree-sitter chunking with graceful fallback when grammar missing",
+    expected: ["src/lib/index/chunker.ts"],
+    note: "chunk() selects language or falls back to line-based chunks.",
   },
   {
-    query: "cli entry point",
-    expectedPath: "src/index.ts",
-    note: "Program startup and command wiring.",
+    category: "Indexing + chunking",
+    query: "Anchor chunk summarizing imports exports comments",
+    expected: ["src/lib/index/chunker.ts"],
+    note: "buildAnchorChunk captures imports/exports/comments/preamble.",
   },
   {
-    query: "index command workflow",
-    expectedPath: "src/commands/index.ts",
-    note: "Full indexing path and wait loop.",
+    category: "Indexing + chunking",
+    query: "Chunk size and overlap limits",
+    expected: ["src/lib/index/chunker.ts"],
+    note: "MAX_CHUNK_LINES/MAX_CHUNK_CHARS with overlaps tuned for context.",
   },
   {
-    query: "doctor command health checks",
-    expectedPath: "src/commands/doctor.ts",
-    note: "Reports model/data/grammar paths.",
+    category: "Indexing + chunking",
+    query: "Breadcrumb formatting for chunk text",
+    expected: ["src/lib/index/chunker.ts"],
+    note: "formatChunkText prepends file breadcrumb headers.",
   },
   {
-    query: "serve command implementation",
-    expectedPath: "src/commands/serve.ts",
-    note: "Server daemon logic.",
+    category: "Indexing + chunking",
+    query: "Language to grammar mapping and supported extensions",
+    expected: ["src/lib/core/languages.ts"],
+    note: "LANGUAGES table defines grammars and definition node types.",
   },
   {
-    query: "list command implementation",
-    expectedPath: "src/commands/list.ts",
-    note: "Listing stores.",
+    category: "Indexing + chunking",
+    query: "Where are tree-sitter grammars downloaded to",
+    expected: ["src/lib/index/grammar-loader.ts"],
+    note: "GRAMMARS_DIR and ensureGrammars downloader.",
   },
   {
-    query: "setup command logic",
-    expectedPath: "src/commands/setup.ts",
-    note: "Initial setup and download.",
+    category: "Indexing + chunking",
+    query: "Split oversized chunks into overlapping windows",
+    expected: ["src/lib/index/chunker.ts"],
+    note: "splitByLines/splitByChars enforce overlaps for long blocks.",
   },
   {
-    query: "search command flags",
-    expectedPath: "src/commands/search.ts",
-    note: "Options like --json, --compact.",
+    category: "Indexing + chunking",
+    query: "Indexer attaches context_prev/next and anchor flags",
+    expected: ["src/lib/index/indexer.ts"],
+    note: "indexFile wires neighbors, chunk_index, is_anchor metadata.",
   },
   {
-    query: "index command dry run",
-    expectedPath: "src/commands/index.ts",
-    note: "Dry run flag handling.",
+    category: "Indexing + chunking",
+    query: "Indexing profile timing toggle",
+    expected: ["src/lib/index/indexer.ts"],
+    note: "PROFILE_ENABLED logs chunking/index timings.",
   },
   {
-    query: "server health check endpoint",
-    expectedPath: "src/commands/serve.ts",
-    note: "/health route.",
+    category: "Indexing + chunking",
+    query: "Embed batch size tuned by env flags",
+    expected: ["src/lib/index/syncer.ts"],
+    note: "resolveEmbedBatchSize uses OSGREP_BATCH_SIZE/FAST/LOW_IMPACT.",
   },
   {
-    query: "server search endpoint",
-    expectedPath: "src/commands/serve.ts",
-    note: "/search route.",
+    category: "Indexing + chunking",
+    query: "Default ignore patterns for indexing",
+    expected: ["src/lib/index/ignore-patterns.ts"],
+    note: "DEFAULT_IGNORE_PATTERNS velvet-rope filters.",
   },
   {
-    query: "claude code integration",
-    expectedPath: "src/commands/claude-code.ts",
-    note: "Claude code specific logic.",
+    category: "Indexing + chunking",
+    query: "Hidden files and gitignore filtering",
+    expected: ["src/lib/index/scanner.ts"],
+    note: "isIgnored checks dotfiles, .osgrepignore, .gitignore caches.",
   },
   {
-    query: "cli version display",
-    expectedPath: "src/index.ts",
-    note: "-v / --version flag.",
+    category: "Indexing + chunking",
+    query: "Delete stale database entries for removed files",
+    expected: ["src/lib/index/syncer.ts"],
+    note: "stalePaths removal when files disappear from disk.",
   },
   {
-    query: "cli help message",
-    expectedPath: "src/index.ts",
-    note: "-h / --help flag.",
+    category: "Indexing + chunking",
+    query: "Skip unchanged files using meta hashes",
+    expected: ["src/lib/index/syncer.ts", "src/lib/store/meta-store.ts"],
+    note: "MetaStore hash comparison avoids re-indexing.",
   },
   {
-    query: "reset index flag",
-    expectedPath: "src/commands/index.ts",
-    note: "--reset handling.",
+    category: "Indexing + chunking",
+    query: "Convert prepared chunks to vectors via workerManager",
+    expected: ["src/lib/index/syncer.ts"],
+    note: "preparedChunksToVectors calls computeHybrid before writes.",
   },
   {
-    query: "compact output format",
-    expectedPath: "src/commands/search.ts",
-    note: "Compact formatting logic.",
-  },
-  {
-    query: "json output format",
-    expectedPath: "src/commands/search.ts",
-    note: "JSON formatting logic.",
-  },
-  {
-    query: "server port configuration",
-    expectedPath: "src/commands/serve.ts",
-    note: "OSGREP_PORT env var.",
-  },
-  {
-    query: "server pid file",
-    expectedPath: "src/commands/serve.ts",
-    note: "Writing server.json.",
-  },
-  {
-    query: "graceful exit",
-    expectedPath: "src/lib/exit.ts",
-    note: "Exit handler.",
+    category: "Indexing + chunking",
+    query: "Live watcher reindexes modified files",
+    expected: ["src/commands/serve.ts"],
+    note: "chokidar watcher triggers indexFile + insertBatch on changes.",
   },
 
-  // --- Configuration & Environment ---
+  // --- Storage + data ---
   {
-    query: "What limits sync concurrency?",
-    expectedPath: "src/utils.ts",
-    note: "p-limit cap in sync/indexing logic.",
+    category: "Storage + data",
+    query: "LanceDB schema and ensure table creation",
+    expected: ["src/lib/store/vector-db.ts"],
+    note: "baseSchemaRow and ensureTable set up vector table.",
   },
   {
-    query: "gitignore caching",
-    expectedPath: "src/lib/git.ts",
-    note: "GitIgnoreFilter memoization.",
+    category: "Storage + data",
+    query: "Create IVF vector index when row count is high",
+    expected: ["src/lib/store/vector-db.ts"],
+    note: "createVectorIndex builds ivf_flat when rows exceed threshold.",
   },
   {
-    query: "osgrepignore support",
-    expectedPath: "src/lib/file.ts",
-    note: "Custom ignore patterns.",
+    category: "Storage + data",
+    query: "Create full-text index for content field",
+    expected: ["src/lib/store/vector-db.ts"],
+    note: "createFTSIndex builds FTS with lancedb.Index.fts.",
   },
   {
-    query: "environment variables config",
-    expectedPath: "src/config.ts",
-    note: "Central config object.",
+    category: "Storage + data",
+    query: "Normalize vectors to configured dimension",
+    expected: ["src/lib/store/vector-db.ts"],
+    note: "normalizeVector pads/trims to CONFIG.VECTOR_DIMENSIONS.",
   },
   {
-    query: "default ignore patterns",
-    expectedPath: "src/lib/ignore-patterns.ts",
-    note: "DEFAULT_IGNORE_PATTERNS list.",
+    category: "Storage + data",
+    query: "List anchor records when enumerating files",
+    expected: ["src/lib/store/vector-db.ts"],
+    note: "listFiles streams anchor entries with hashes.",
   },
   {
-    query: "thread count configuration",
-    expectedPath: "src/lib/worker.ts",
-    note: "OSGREP_THREADS handling.",
-  },
-  {
-    query: "low impact mode",
-    expectedPath: "src/lib/worker.ts",
-    note: "OSGREP_LOW_IMPACT flag.",
-  },
-  {
-    query: "debug models flag",
-    expectedPath: "src/lib/worker.ts",
-    note: "OSGREP_DEBUG_MODELS.",
-  },
-  {
-    query: "profile enabled flag",
-    expectedPath: "src/lib/local-store.ts",
-    note: "OSGREP_PROFILE.",
-  },
-  {
-    query: "model ids configuration",
-    expectedPath: "src/config.ts",
-    note: "MODEL_IDS constant.",
-  },
-  {
-    query: "user home directory",
-    expectedPath: "src/lib/worker.ts|src/lib/local-store.ts",
-    note: "os.homedir() usage.",
-  },
-  {
-    query: "project root detection",
-    expectedPath: "src/lib/worker.ts",
-    note: "process.cwd() usage.",
-  },
-  {
-    query: "device selection (cpu/gpu)",
-    expectedPath: "src/lib/worker.ts",
-    note: "OSGREP_DEVICE.",
-  },
-  {
-    query: "local models directory",
-    expectedPath: "src/lib/worker.ts",
-    note: "Checking for 'models' dir.",
-  },
-  {
-    query: "huggingface cache dir",
-    expectedPath: "src/lib/worker.ts",
-    note: "env.cacheDir setting.",
+    category: "Storage + data",
+    query: "LocalStore wires indexer searcher and vector db",
+    expected: ["src/lib/store/local-store.ts"],
+    note: "LocalStore composes VectorDB + Indexer + Searcher.",
   },
 
-  // --- Utilities & Helpers ---
+  // --- CLI + server ---
   {
-    query: "cleanup zombie files",
-    expectedPath: "src/utils.ts",
-    note: "Pruning/cleanup logic during sync.",
+    category: "CLI + server",
+    query: "Search command hits running server via lock file",
+    expected: ["src/commands/search.ts", "src/lib/utils/lockfile.ts"],
+    note: "tryServerFastPath uses server.json auth token for /search.",
   },
   {
-    query: "list files using git ls-files",
-    expectedPath: "src/lib/git.ts",
-    note: "NodeGit getGitFiles implementation.",
+    category: "CLI + server",
+    query: "Serve /search endpoint enforces payload limits and indexing guard",
+    expected: ["src/commands/serve.ts"],
+    note: "MAX_REQUEST_BYTES and indexing_in_progress backpressure.",
   },
   {
-    query: "hidden file handling",
-    expectedPath: "src/lib/file.ts",
-    note: "isHiddenFile logic.",
+    category: "CLI + server",
+    query: "Server writes auth token lock file with PID",
+    expected: ["src/commands/serve.ts", "src/lib/utils/lockfile.ts"],
+    note: "writeServerLock stores port/pid/authToken in .osgrep/server.json.",
   },
   {
-    query: "file hash computation",
-    expectedPath: "src/utils.ts",
-    note: "computeFileHash and buffer hashing.",
+    category: "CLI + server",
+    query: "Index command reset wipes store and meta cache",
+    expected: ["src/commands/index.ts"],
+    note: "--reset drops store and prunes meta.json entries.",
   },
   {
-    query: "initial sync spinner text",
-    expectedPath: "src/lib/sync-helpers.ts",
-    note: "createIndexingSpinner formatting.",
+    category: "CLI + server",
+    query: "Formatter presents agent/plain vs human outputs",
+    expected: ["src/lib/utils/formatter.ts"],
+    note: "Plain mode for agents; pretty mode stitches chunks for humans.",
   },
   {
-    query: "dry run summary message",
-    expectedPath: "src/lib/sync-helpers.ts",
-    note: "formatDryRunSummary phrasing.",
+    category: "CLI + server",
+    query: "List command formats sizes and time ago",
+    expected: ["src/commands/list.ts"],
+    note: "formatSize/formatDate used when listing stores.",
   },
   {
-    query: "skip empty files during indexing",
-    expectedPath: "src/utils.ts",
-    note: "Zero-byte guard before indexing.",
+    category: "CLI + server",
+    query: "Doctor command verifies models data and grammars",
+    expected: ["src/commands/doctor.ts"],
+    note: "Health check shows PATHS and missing models.",
   },
   {
-    query: "MetaStore caching hashes",
-    expectedPath: "src/utils.ts",
-    note: "Skip unchanged files using meta.json.",
+    category: "CLI + server",
+    query: "Setup command downloads models and grammars",
+    expected: ["src/commands/setup.ts", "src/lib/setup/setup-helpers.ts"],
+    note: "ensureSetup + ensureGrammars prepare ~/.osgrep assets.",
   },
   {
-    query: "store resolver logic",
-    expectedPath: "src/lib/store-resolver.ts",
-    note: "getAutoStoreId implementation.",
-  },
-  {
-    query: "auto-detect store name",
-    expectedPath: "src/lib/store-resolver.ts",
-    note: "Naming based on git remote or dir.",
-  },
-  {
-    query: "pretty print bytes",
-    expectedPath: "src/commands/list.ts",
-    note: "Formatting file sizes.",
-  },
-  {
-    query: "time ago formatter",
-    expectedPath: "src/commands/list.ts",
-    note: "Formatting dates.",
-  },
-  {
-    query: "uuid generation",
-    expectedPath: "src/lib/local-store.ts",
-    note: "uuidv4 usage.",
-  },
-  {
-    query: "check if file is binary",
-    expectedPath: "src/lib/file.ts",
-    note: "isBinaryFile check.",
-  },
-  {
-    query: "read file content",
-    expectedPath: "src/lib/local-store.ts",
-    note: "fs.readFileSync or stream reading.",
-  },
-  {
-    query: "create directory recursively",
-    expectedPath: "src/lib/local-store.ts",
-    note: "fs.mkdirSync with recursive.",
-  },
-  {
-    query: "check file existence",
-    expectedPath: "src/lib/local-store.ts",
-    note: "fs.existsSync.",
-  },
-  {
-    query: "path join usage",
-    expectedPath: "src/lib/local-store.ts",
-    note: "path.join.",
-  },
-  {
-    query: "performance timing",
-    expectedPath: "src/lib/local-store.ts",
-    note: "process.hrtime.bigint().",
-  },
-  {
-    query: "console logging wrapper",
-    expectedPath: "src/lib/worker.ts",
-    note: "log function.",
+    category: "CLI + server",
+    query: "Claude Code plugin installation flow",
+    expected: ["src/commands/claude-code.ts"],
+    note: "install-claude-code wraps claude plugin marketplace/install.",
   },
 
-  // --- Error Handling & Edge Cases ---
+  // --- Config + utilities ---
   {
-    query: "schema mismatch detection",
-    expectedPath: "src/lib/local-store.ts",
-    note: "Checking vector dimensions.",
+    category: "Config + utilities",
+    query: "Model ids and embedding dimensions configuration",
+    expected: ["src/config.ts"],
+    note: "MODEL_IDS and CONFIG.VECTOR_DIMENSIONS/COLBERT_DIM.",
   },
   {
-    query: "drop table on mismatch",
-    expectedPath: "src/lib/local-store.ts",
-    note: "Recreating table if schema differs.",
+    category: "Config + utilities",
+    query: "Worker timeout and memory caps env vars",
+    expected: ["src/config.ts"],
+    note: "WORKER_TIMEOUT_MS and MAX_WORKER_MEMORY_MB defaults.",
   },
   {
-    query: "fts index creation failure",
-    expectedPath: "src/lib/local-store.ts",
-    note: "Catching FTS creation errors.",
+    category: "Config + utilities",
+    query: "Indexable extensions and max file size limit",
+    expected: ["src/lib/utils/file-utils.ts"],
+    note: "INDEXABLE_EXTENSIONS and 1MB guard in isIndexableFile.",
   },
   {
-    query: "vector index creation failure",
-    expectedPath: "src/lib/local-store.ts",
-    note: "Catching vector index errors.",
+    category: "Config + utilities",
+    query: "Compute sha256 for buffers to detect changes",
+    expected: ["src/lib/utils/file-utils.ts"],
+    note: "computeBufferHash/computeFileHash helpers.",
   },
   {
-    query: "worker error propagation",
-    expectedPath: "src/lib/worker-manager.ts",
-    note: "Passing errors from worker to main.",
+    category: "Config + utilities",
+    query: "Debounce helper for batching watcher work",
+    expected: ["src/lib/utils/debounce.ts"],
+    note: "debounce utility used by serve watcher.",
   },
   {
-    query: "handle missing store",
-    expectedPath: "src/lib/local-store.ts",
-    note: "Error when store doesn't exist.",
+    category: "Config + utilities",
+    query: "Graceful exit helper before process termination",
+    expected: ["src/lib/utils/exit.ts"],
+    note: "gracefulExit waits to flush stdout/stderr.",
   },
   {
-    query: "handle empty store",
-    expectedPath: "src/eval.ts",
-    note: "Check in eval script.",
+    category: "Config + utilities",
+    query: "Auto-generate store id from git remote",
+    expected: ["src/lib/store/store-utils.ts"],
+    note: "getAutoStoreId extracts remote info or hashes path.",
   },
   {
-    query: "invalid colbert dimensions",
-    expectedPath: "src/lib/worker.ts",
-    note: "Throwing error on bad dims.",
-  },
-  {
-    query: "fallback to cpu",
-    expectedPath: "src/lib/worker.ts",
-    note: "Retry with CPU if device fails.",
-  },
-  {
-    query: "download model retry",
-    expectedPath: "src/lib/worker.ts",
-    note: "Retrying model download.",
-  },
-  {
-    query: "unknown message type in worker",
-    expectedPath: "src/lib/worker.ts",
-    note: "Throwing error for unknown msg.",
-  },
-  {
-    query: "handle symlinks",
-    expectedPath: "src/lib/file.ts",
-    note: "lstat vs stat.",
-  },
-  {
-    query: "permission denied handling",
-    expectedPath: "src/lib/file.ts",
-    note: "Access errors.",
-  },
-  {
-    query: "graceful shutdown on signal",
-    expectedPath: "src/index.ts",
-    note: "SIGINT/SIGTERM handling.",
-  },
-  {
-    query: "timeout handling for worker",
-    expectedPath: "src/lib/worker-manager.ts",
-    note: "Request timeout logic.",
+    category: "Config + utilities",
+    query: "Where is meta.json path configured",
+    expected: ["src/config.ts", "src/lib/store/meta-store.ts"],
+    note: "PATHS.meta drives MetaStore load/save location.",
   },
 ];
 
-
-
 const storeId = process.argv[2] ?? getAutoStoreId(process.cwd());
-const topK = 20;
+const topK = Number.parseInt(process.env.OSGREP_EVAL_TOP_K ?? "25", 10);
 
-export function evaluateCase(
+function evaluateCase(
   response: SearchResponse,
   evalCase: EvalCase,
   timeMs: number,
 ): EvalResult {
-  const expectedPaths = evalCase.expectedPath
-    .split("|")
-    .map((p) => p.trim().toLowerCase())
-    .filter(Boolean);
+  const expected = evalCase.expected.map((p) => p.toLowerCase());
+  const avoid = (evalCase.avoid ?? []).map((p) => p.toLowerCase());
 
   const rank = response.data.findIndex((chunk) => {
     const path = chunk.metadata?.path?.toLowerCase() || "";
-    return expectedPaths.some((expected) => path.includes(expected));
+    return expected.some((target) => path.includes(target));
   });
 
-  const avoidRank = response.data.findIndex((chunk) =>
-    chunk.metadata?.path
-      ?.toLowerCase()
-      .includes(evalCase.avoidPath?.toLowerCase() || "_____"),
-  );
+  const avoidRank = response.data.findIndex((chunk) => {
+    const path = chunk.metadata?.path?.toLowerCase() || "";
+    return avoid.some((target) => path.includes(target));
+  });
 
   const hitAvoid =
-    evalCase.avoidPath && avoidRank >= 0 && (rank === -1 || avoidRank < rank);
+    avoid.length > 0 && avoidRank >= 0 && (rank === -1 || avoidRank < rank);
   const found = rank >= 0 && !hitAvoid;
   const rr = found ? 1 / (rank + 1) : 0;
   const recall = found && rank < 10 ? 1 : 0;
 
   return {
+    category: evalCase.category,
+    query: evalCase.query,
+    note: evalCase.note,
+    pathHint: evalCase.expected.join(" | "),
     rr,
     found,
     recall,
-    path: evalCase.expectedPath,
-    query: evalCase.query,
-    note: evalCase.note,
     timeMs,
   };
 }
 
+function summarize(results: EvalResult[]) {
+  if (results.length === 0) {
+    return { mrr: 0, recallAt10: 0, hits: 0, total: 0, avgMs: 0 };
+  }
+  const hits = results.filter((r) => r.found).length;
+  const mrr = results.reduce((sum, r) => sum + r.rr, 0) / results.length;
+  const recallAt10 =
+    results.reduce((sum, r) => sum + r.recall, 0) / results.length;
+  const avgMs = results.reduce((sum, r) => sum + r.timeMs, 0) / results.length;
+  return { mrr, recallAt10, hits, total: results.length, avgMs };
+}
+
+async function assertStoreReady(store: LocalStore, id: string) {
+  try {
+    await store.retrieve(id);
+  } catch {
+    console.error(`❌ Store "${id}" does not exist!`);
+    console.error(
+      `   Run "osgrep index" first to create and populate the store.`,
+    );
+    process.exit(1);
+  }
+
+  const sanity = await store.search(id, "test", 1);
+  if (sanity.data.length === 0) {
+    console.error(`⚠️  Store "${id}" appears to be empty!`);
+    console.error(`   Run "osgrep index" to populate the store with data.`);
+    process.exit(1);
+  }
+}
+
 async function run() {
   const store = new LocalStore();
-
-  // 1. Ensure the store exists
-  try {
-    await store.retrieve(storeId);
-  } catch {
-    console.error(`❌ Store "${storeId}" does not exist!`);
-    console.error(`   Run "osgrep index" first to create and populate the store.`);
-    process.exit(1);
-  }
-
-  // 2. Check if store has data
-  try {
-    const testResult = await store.search(storeId, "test", 1);
-    if (testResult.data.length === 0) {
-      console.error(`⚠️  Store "${storeId}" appears to be empty!`);
-      console.error(`   Run "osgrep index" to populate the store with data.`);
-      process.exit(1);
-    }
-  } catch (err) {
-    console.error(`❌ Error checking store data:`, err);
-    process.exit(1);
-  }
+  await assertStoreReady(store, storeId);
 
   const results: EvalResult[] = [];
 
-  console.log("Starting evaluation...\n");
+  console.log(
+    `Running ${cases.length} eval cases against store "${storeId}" (topK=${topK})...\n`,
+  );
   const startTime = performance.now();
 
   for (const c of cases) {
     const queryStart = performance.now();
     const res = await store.search(storeId, c.query, topK);
-    const queryEnd = performance.now();
-    const timeMs = queryEnd - queryStart;
-
+    const timeMs = performance.now() - queryStart;
     results.push(evaluateCase(res, c, timeMs));
   }
 
   const totalTime = performance.now() - startTime;
-  const mrr = results.reduce((sum, r) => sum + r.rr, 0) / results.length;
-  const recallAt10 =
-    results.reduce((sum, r) => sum + r.recall, 0) / results.length;
-  const avgTime =
-    results.reduce((sum, r) => sum + r.timeMs, 0) / results.length;
+  const overall = summarize(results);
+
+  const byCategory = new Map<string, EvalResult[]>();
+  for (const r of results) {
+    const existing = byCategory.get(r.category) ?? [];
+    existing.push(r);
+    byCategory.set(r.category, existing);
+  }
 
   console.log("=".repeat(80));
   console.log(`Eval results for store: ${storeId}`);
@@ -713,21 +496,46 @@ async function run() {
   results.forEach((r) => {
     const status = r.found ? `rank ${(1 / r.rr).toFixed(0)}` : "❌ missed";
     const emoji = r.found ? (r.rr === 1 ? "🎯" : "✓") : "❌";
-    console.log(`${emoji} ${r.query}`);
+    console.log(`[${r.category}] ${emoji} ${r.query}`);
     console.log(
-      `   => ${status} (target: ${r.path}) [${r.timeMs.toFixed(0)}ms]`,
+      `   => ${status} (target: ${r.pathHint}) [${r.timeMs.toFixed(0)}ms]`,
     );
-    if (r.note) {
-      console.log(`   // ${r.note}`);
-    }
+    if (r.note) console.log(`   // ${r.note}`);
   });
+
   console.log("=".repeat(80));
-  console.log(`MRR: ${mrr.toFixed(3)}`);
-  console.log(`Recall@10: ${recallAt10.toFixed(3)}`);
-  console.log(`Avg query time: ${avgTime.toFixed(0)}ms`);
-  console.log(`Total time: ${totalTime.toFixed(0)}ms`);
   console.log(
-    `Found: ${results.filter((r) => r.found).length}/${results.length}`,
+    `Overall • hits ${overall.hits}/${overall.total} • MRR ${overall.mrr.toFixed(3)} • Recall@10 ${overall.recallAt10.toFixed(3)} • Avg ${overall.avgMs.toFixed(0)}ms • Total ${totalTime.toFixed(0)}ms`,
+  );
+
+  console.log("\nPer-category:");
+  for (const [category, group] of byCategory.entries()) {
+    const stats = summarize(group);
+    console.log(
+      ` - ${category}: ${stats.hits}/${stats.total} hits • MRR ${stats.mrr.toFixed(3)} • Recall@10 ${stats.recallAt10.toFixed(3)} • Avg ${stats.avgMs.toFixed(0)}ms`,
+    );
+  }
+
+  const misses = results.filter((r) => !r.found);
+  if (misses.length > 0) {
+    console.log("\nMisses to inspect:");
+    misses.forEach((m) =>
+      console.log(` - [${m.category}] ${m.query} (expected ${m.pathHint})`),
+    );
+  } else {
+    console.log("\nAll cases matched their targets. 🎉");
+  }
+
+  const slowest = [...results]
+    .sort((a, b) => b.timeMs - a.timeMs)
+    .slice(0, 5);
+  console.log("\nSlowest queries:");
+  slowest.forEach((s) =>
+    console.log(
+      ` - ${s.query} [${s.category}] ${s.timeMs.toFixed(0)}ms ${
+        s.found ? "" : "(missed)"
+      }`,
+    ),
   );
   console.log("=".repeat(80));
 }

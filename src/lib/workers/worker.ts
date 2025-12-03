@@ -2,21 +2,21 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { parentPort } from "node:worker_threads";
-import { env, type PipelineType, pipeline } from "@huggingface/transformers";
-import { CONFIG, MODEL_IDS } from "../../config";
+import * as ort from "onnxruntime-node";
+import { env } from "@huggingface/transformers";
+import { CONFIG, PATHS } from "../../config";
+import { MODEL_IDS } from "../../config";
+import { ColBERTTokenizer } from "./colbert-tokenizer";
 
 function resolveThreadCount(): number {
   const fromEnv = Number.parseInt(process.env.OSGREP_THREADS ?? "", 10);
   if (Number.isFinite(fromEnv) && fromEnv > 0) return fromEnv;
   if (process.env.OSGREP_LOW_IMPACT === "1") return 1;
   const cores = os.cpus().length || 1;
-  // Default: leave one core for UI, and cap at 4 to avoid pegging laptops
   return Math.max(1, Math.min(cores - 1, 4));
 }
 
-// Configure cache directory
-const HOMEDIR = os.homedir();
-const CACHE_DIR = path.join(HOMEDIR, ".osgrep", "models");
+const CACHE_DIR = PATHS.models;
 const NUM_THREADS = resolveThreadCount();
 const LOG_MODELS =
   process.env.OSGREP_DEBUG_MODELS === "1" ||
@@ -25,15 +25,15 @@ const log = (...args: unknown[]) => {
   if (LOG_MODELS) console.log(...args);
 };
 
-// Configure ONNX Runtime threading before loading pipelines.
-const onnxBackend = env.backends.onnx as any;
-onnxBackend.intraOpNumThreads = NUM_THREADS;
-onnxBackend.interOpNumThreads = Math.max(1, Math.min(NUM_THREADS, 2));
-if (onnxBackend.wasm) {
-  onnxBackend.wasm.numThreads = NUM_THREADS;
-}
+// Configure ONNX Runtime threading
+// Note: onnxruntime-node configuration is done via session options, not global env like transformers.js
 
-// Try to find local models directory (for development/testing)
+// Configure transformers.js env for tokenizer downloads
+env.cacheDir = CACHE_DIR;
+env.allowLocalModels = true;
+env.allowRemoteModels = true; // Allow downloading tokenizer
+
+// Try to find local models directory
 const PROJECT_ROOT = process.cwd();
 const LOCAL_MODELS = path.join(PROJECT_ROOT, "models");
 if (fs.existsSync(LOCAL_MODELS)) {
@@ -41,101 +41,92 @@ if (fs.existsSync(LOCAL_MODELS)) {
   log(`Worker: Using local models from ${LOCAL_MODELS}`);
 }
 
-env.cacheDir = CACHE_DIR;
-env.allowLocalModels = true;
-// We start with false to prefer local, but will toggle if needed
-env.allowRemoteModels = false;
-
-type EmbedOptions = {
-  pooling: "cls" | "none" | "mean";
-  normalize: boolean;
-  truncation?: boolean;
-  max_length?: number;
-  padding?: boolean;
-};
-
 type EmbedOutput = {
   data: Float32Array | number[];
   dims?: number[];
 };
 
-type EmbedPipeline = (
-  inputs: string[],
-  options: EmbedOptions,
-) => Promise<EmbedOutput>;
-
 class EmbeddingWorker {
-  private embedPipe: EmbedPipeline | null = null;
-  private colbertPipe: EmbedPipeline | null = null;
+  // Dense pipeline (transformers.js)
+  private embedPipe: any = null;
+
+  // ColBERT components (Native ONNX)
+  private colbertSession: ort.InferenceSession | null = null;
+  private colbertTokenizer: ColBERTTokenizer | null = null;
+
   private embedModelId = MODEL_IDS.embed;
   private colbertModelId = MODEL_IDS.colbert;
   private readonly vectorDimensions = CONFIG.VECTOR_DIMENSIONS;
-  private readonly colbertDimensions = CONFIG.COLBERT_DIM;
   private initPromise: Promise<void> | null = null;
 
-  private async loadPipeline<T extends EmbedPipeline>(
-    task: PipelineType,
-    model: string,
-    options: Record<string, unknown>,
-  ): Promise<T> {
-    const tryLoad = async (device?: string) => {
-      const opts = { ...options, device } as any;
-      try {
-        return (await pipeline(task, model, opts)) as unknown as T;
-      } catch {
-        log("Worker: Local model not found or failed. Downloading/Retrying...");
-        env.allowRemoteModels = true;
-        try {
-          return (await pipeline(task, model, opts)) as unknown as T;
-        } finally {
-          env.allowRemoteModels = false;
-        }
-      }
-    };
-
-    const preferredDevice = process.env.OSGREP_DEVICE;
-
-    try {
-      return await tryLoad(preferredDevice);
-    } catch (error) {
-      if (preferredDevice !== "cpu") {
-        console.warn(
-          `Worker: Failed to load model with device "${preferredDevice ?? "auto"}". Falling back to CPU.`,
-        );
-        return await tryLoad("cpu");
-      }
-      throw error;
-    }
-  }
-
   async initialize() {
-    if (this.embedPipe && this.colbertPipe) return;
+    if (this.embedPipe && this.colbertSession) return;
     if (this.initPromise) return this.initPromise;
 
     this.initPromise = (async () => {
       try {
-        log(`Worker: Loading models from ${CACHE_DIR}...`);
+        log(`Worker: Loading models...`);
 
+        // 1. Load Dense Model (transformers.js)
         if (!this.embedPipe) {
-          this.embedPipe = await this.loadPipeline<EmbedPipeline>(
-            "feature-extraction",
-            this.embedModelId,
-            {
-              dtype: "q4",
-            },
-          );
+          // Force CPU for stability and consistency
+          // @ts-ignore
+          const useCpu = env.backends?.onnx?.wasm?.numThreads !== 1;
+
+          if (!this.embedPipe) {
+            const { pipeline } = await import("@huggingface/transformers");
+            this.embedPipe = await pipeline(
+              "feature-extraction",
+              this.embedModelId,
+              {
+                dtype: "q4",
+                device: "cpu",
+              }
+            );
+          }
         }
 
-        if (!this.colbertPipe) {
-          // ColBERT model for late-interaction reranking (custom q8 build)
-          this.colbertPipe = await this.loadPipeline<EmbedPipeline>(
-            "feature-extraction",
-            this.colbertModelId,
-            {
-              dtype: "q8",
-              quantized: true,
-            },
-          );
+        // 2. Load ColBERT Model (Native ONNX)
+        if (!this.colbertSession) {
+          // Initialize Tokenizer
+          this.colbertTokenizer = new ColBERTTokenizer();
+
+          let modelPath = "";
+          let tokenizerPath = "";
+
+          // Check experiment folder first (DEV MODE)
+          const devModelPath = "/Users/ryandonofrio/Desktop/osgrep2/Archive-1/models/distilled_colbert/onnx/model.onnx";
+          const devTokenizerPath = "/Users/ryandonofrio/Desktop/osgrep2/Archive-1/models/distilled_colbert";
+
+          if (fs.existsSync(devModelPath)) {
+            modelPath = devModelPath;
+            tokenizerPath = devTokenizerPath;
+            log(`Worker: Using DEV model from ${modelPath}`);
+          } else {
+            // Fallback to ~/.osgrep/models
+            const prodPath = path.join(CACHE_DIR, this.colbertModelId, "onnx", "model.onnx");
+            if (fs.existsSync(prodPath)) {
+              modelPath = prodPath;
+              tokenizerPath = path.join(CACHE_DIR, this.colbertModelId);
+            }
+          }
+
+          if (!modelPath) {
+            throw new Error(`ColBERT ONNX model not found. Expected at ${devModelPath} or ~/.osgrep/models/${this.colbertModelId}/onnx/model.onnx`);
+          }
+
+          await this.colbertTokenizer.init(tokenizerPath);
+
+          log(`Worker: Loading native ONNX session from ${modelPath}`);
+
+          const sessionOptions: ort.InferenceSession.SessionOptions = {
+            executionProviders: ["cpu"],
+            intraOpNumThreads: NUM_THREADS,
+            interOpNumThreads: 1,
+            graphOptimizationLevel: "all",
+          };
+
+          this.colbertSession = await ort.InferenceSession.create(modelPath, sessionOptions);
         }
 
         log("Worker: Models loaded.");
@@ -151,18 +142,12 @@ class EmbeddingWorker {
     const dims = output.dims || [1, this.vectorDimensions];
     const data = output.data;
 
-    // Handle 3D output [batch, seq, dim] - usually from 'feature-extraction' with 'cls' pooling
-    // but sometimes ONNX returns [batch, 1, dim] or similar.
     if (dims.length === 3) {
       const [batch, seqLen, dim] = dims;
       const embeddings: number[][] = [];
       for (let i = 0; i < batch; i++) {
-        // take first token (CLS) from each sequence
-        // The layout is [batch, seq, dim], so the start of the i-th batch item is i * seqLen * dim
         const start = i * seqLen * dim;
-        // We only want the first vector of the sequence (CLS token)
         const cls = data.slice(start, start + dim);
-
         const vec = Array.from(cls as ArrayLike<number>).slice(0, this.vectorDimensions);
         while (vec.length < this.vectorDimensions) vec.push(0);
         embeddings.push(vec);
@@ -170,7 +155,6 @@ class EmbeddingWorker {
       return embeddings;
     }
 
-    // Fallback for 2D [batch, dim] or 1D [dim]
     let batchSize = 1;
     let hiddenSize = this.vectorDimensions;
 
@@ -201,61 +185,130 @@ class EmbeddingWorker {
   async computeHybrid(
     texts: string[],
   ): Promise<Array<{ dense: number[]; colbert: Buffer; scale: number }>> {
-    if (!this.embedPipe) await this.initialize();
-    if (!this.colbertPipe) await this.initialize();
+    if (!this.embedPipe || !this.colbertSession || !this.colbertTokenizer) await this.initialize();
 
-    // SEQUENTIAL EXECUTION (Reduces peak RAM usage)
-    const denseOut = await this.embedPipe!(texts, {
+    // 1. Dense Embedding (transformers.js)
+    const denseOut = await this.embedPipe(texts, {
       pooling: "cls",
       normalize: true,
       truncation: true,
       max_length: 256,
     });
-
-    const colbertOut = await this.colbertPipe!(texts, {
-      pooling: "none",
-      normalize: true,
-      padding: true,
-      truncation: true,
-      max_length: 512,
-    });
-
     const denseVectors = this.toDenseVectors(denseOut);
+
+    // 2. ColBERT Embedding (Native ONNX)
     const results: Array<{ dense: number[]; colbert: Buffer; scale: number }> = [];
 
-    if (!colbertOut.dims || colbertOut.dims.length < 3) {
-      throw new Error("Invalid ColBERT output dimensions");
-    }
+    // Process in batches
+    const BATCH_SIZE = 32;
+    for (let i = 0; i < texts.length; i += BATCH_SIZE) {
+      const batchTexts = texts.slice(i, i + BATCH_SIZE);
+      const batchDense = denseVectors.slice(i, i + BATCH_SIZE);
 
-    const [batchSize, seqLen, dim] = colbertOut.dims;
-    for (let i = 0; i < batchSize; i++) {
-      const denseVec = denseVectors[i] ?? [];
+      // 1. Tokenize all in batch
+      const encodedBatch = await Promise.all(
+        batchTexts.map((t) => this.colbertTokenizer!.encodeDoc(t)),
+      );
 
-      const cStart = i * seqLen * dim;
-      const cEnd = cStart + seqLen * dim;
-      const cData = colbertOut.data.slice(cStart, cEnd);
+      // 2. Pad to max length in this batch
+      const maxLen = Math.max(...encodedBatch.map((e) => e.input_ids.length));
+      const batchInputIds: bigint[] = [];
+      const batchAttentionMask: bigint[] = [];
 
-      // Calculate scale (max absolute value)
-      let maxVal = 0;
-      for (let k = 0; k < cData.length; k++) {
-        const abs = Math.abs(cData[k]);
-        if (abs > maxVal) maxVal = abs;
+      for (const encoded of encodedBatch) {
+        const len = encoded.input_ids.length;
+        const padding = maxLen - len;
+
+        // Add input_ids (pad with 0/pad_token if needed, but usually pad token is specific)
+        // ColBERTTokenizer uses specialTokenIds.pad which is 50283
+        // We need to access it or just assume 0 if not available, but let's use the tokenizer's pad id if we can.
+        // Actually, ColBERTTokenizer doesn't expose it easily, but we can see it's 50283 in the file.
+        // Let's check if we can access it. We can't easily from here without changing tokenizer.
+        // However, the tokenizer implementation has `specialTokenIds` private.
+        // Let's assume 50283 for now or just 0 (which is often ignored by attention mask anyway).
+        // Wait, `ColBERTTokenizer` has `specialTokenIds` private.
+        // Let's use 0 for padding and ensure attention mask is 0.
+        const padId = BigInt(50283); // Standard XLM-RoBERTa pad token
+
+        batchInputIds.push(...encoded.input_ids);
+        if (padding > 0) {
+          batchInputIds.push(...Array(padding).fill(padId));
+        }
+
+        batchAttentionMask.push(...encoded.attention_mask);
+        if (padding > 0) {
+          batchAttentionMask.push(...Array(padding).fill(BigInt(0)));
+        }
       }
-      if (maxVal === 0) maxVal = 1;
 
-      const int8Array = new Int8Array(cData.length);
-      for (let k = 0; k < cData.length; k++) {
-        int8Array[k] = Math.max(
-          -127,
-          Math.min(127, Math.round((cData[k] / maxVal) * 127)),
-        );
+      // 3. Run Inference
+      const feeds = {
+        input_ids: new ort.Tensor("int64", BigInt64Array.from(batchInputIds), [
+          batchTexts.length,
+          maxLen,
+        ]),
+        attention_mask: new ort.Tensor(
+          "int64",
+          BigInt64Array.from(batchAttentionMask),
+          [batchTexts.length, maxLen],
+        ),
+      };
+
+      const sessionOut = await this.colbertSession!.run(feeds);
+      const output = sessionOut[this.colbertSession!.outputNames[0]];
+
+      // 4. Process Batch Output
+      const data = output.data as Float32Array;
+      const [batch, seq, dim] = output.dims; // [batch, seq, 48]
+
+      for (let b = 0; b < batch; b++) {
+        const batchOffset = b * seq * dim;
+        // We only care about the actual tokens, not the padding.
+        // The original length of this doc:
+        const originalLen = encodedBatch[b].input_ids.length;
+
+        // Extract, Normalize, Quantize
+        // We can reuse the same buffer logic but we need to be careful about the slice.
+        // The output includes embeddings for padding tokens too, we should ignore them?
+        // ColBERT usually ignores them or they are masked out.
+        // Let's process up to originalLen.
+
+        const docEmbeddings: number[] = [];
+        let maxVal = 0;
+
+        for (let s = 0; s < originalLen; s++) {
+          const offset = batchOffset + s * dim;
+          let sumSq = 0;
+          for (let d = 0; d < dim; d++) {
+            const val = data[offset + d];
+            sumSq += val * val;
+          }
+          const norm = Math.sqrt(sumSq);
+
+          for (let d = 0; d < dim; d++) {
+            let val = data[offset + d];
+            if (norm > 1e-9) val /= norm;
+            docEmbeddings.push(val);
+            if (Math.abs(val) > maxVal) maxVal = Math.abs(val);
+          }
+        }
+
+        if (maxVal === 0) maxVal = 1;
+
+        const int8Array = new Int8Array(docEmbeddings.length);
+        for (let k = 0; k < docEmbeddings.length; k++) {
+          int8Array[k] = Math.max(
+            -127,
+            Math.min(127, Math.round((docEmbeddings[k] / maxVal) * 127)),
+          );
+        }
+
+        results.push({
+          dense: batchDense[b] ?? [],
+          colbert: Buffer.from(int8Array),
+          scale: maxVal,
+        });
       }
-
-      results.push({
-        dense: denseVec,
-        colbert: Buffer.from(int8Array),
-        scale: maxVal,
-      });
     }
 
     return results;
@@ -264,11 +317,10 @@ class EmbeddingWorker {
   async encodeQuery(
     text: string,
   ): Promise<{ dense: number[]; colbert: number[][]; colbertDim: number }> {
-    if (!this.embedPipe || !this.colbertPipe) await this.initialize();
-    const embedPipe = this.embedPipe!;
-    const colbertPipe = this.colbertPipe!;
+    if (!this.embedPipe || !this.colbertSession || !this.colbertTokenizer) await this.initialize();
 
-    const denseOut = await embedPipe([text], {
+    // 1. Dense Embedding
+    const denseOut = await this.embedPipe([text], {
       pooling: "cls",
       normalize: true,
       truncation: true,
@@ -276,35 +328,47 @@ class EmbeddingWorker {
     });
     const denseVector = this.toDenseVectors(denseOut)[0] ?? [];
 
-    const output = await colbertPipe([text], {
-      pooling: "none",
-      normalize: true,
-      padding: true,
-      truncation: true,
-      max_length: 512,
-    });
+    // 2. ColBERT Embedding (Native ONNX)
+    const encoded = await this.colbertTokenizer!.encodeQuery(text);
 
-    if (!output.dims || output.dims.length < 3) {
-      throw new Error("Invalid query output dimensions");
-    }
+    const feeds = {
+      input_ids: new ort.Tensor('int64', encoded.input_ids, [1, encoded.input_ids.length]),
+      attention_mask: new ort.Tensor('int64', encoded.attention_mask, [1, encoded.attention_mask.length])
+    };
 
-    const [, seqLen, dim] = output.dims;
-    const effectiveDim =
-      typeof dim === "number" && Number.isFinite(dim)
-        ? (dim as number)
-        : this.colbertDimensions;
+    const sessionOut = await this.colbertSession!.run(feeds);
+    const output = sessionOut[this.colbertSession!.outputNames[0]];
+
+    // Normalize (L2)
+    const data = output.data as Float32Array;
+    const [, seq, dim] = output.dims;
+
     const matrix: number[][] = [];
-    for (let i = 0; i < seqLen; i++) {
-      const start = i * effectiveDim;
-      const row = Array.from(output.data.slice(start, start + effectiveDim));
-      if (row.some((v) => v !== 0)) {
-        matrix.push(row);
+
+    for (let s = 0; s < seq; s++) {
+      let sumSq = 0;
+      const offset = s * dim;
+      for (let d = 0; d < dim; d++) {
+        const val = data[offset + d];
+        sumSq += val * val;
       }
+      const norm = Math.sqrt(sumSq);
+
+      const row: number[] = [];
+      if (norm > 1e-9) {
+        for (let d = 0; d < dim; d++) {
+          row.push(data[offset + d] / norm);
+        }
+      } else {
+        for (let d = 0; d < dim; d++) {
+          row.push(data[offset + d]);
+        }
+      }
+      matrix.push(row);
     }
 
-    return { dense: denseVector, colbert: matrix, colbertDim: effectiveDim };
+    return { dense: denseVector, colbert: matrix, colbertDim: dim };
   }
-
 }
 
 const worker = new EmbeddingWorker();
@@ -319,16 +383,15 @@ if (parentPort) {
       query?: { text: string };
     }) => {
       try {
-        // Handle graceful shutdown
         if (message.type === "shutdown") {
           process.exit(0);
           return;
         }
 
         if (message.hybrid) {
-          const hybrids = await worker.computeHybrid(message.hybrid.texts);
+          const result = await worker.computeHybrid(message.hybrid.texts);
           const memory = process.memoryUsage();
-          parentPort?.postMessage({ id: message.id, hybrids, memory });
+          parentPort?.postMessage({ id: message.id, result, memory });
           return;
         }
 

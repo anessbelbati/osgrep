@@ -16,8 +16,8 @@ const LOG_MODELS =
  */
 export async function downloadModels(): Promise<void> {
   return new Promise((resolve, reject) => {
-    const tsWorkerPath = path.join(__dirname, "download-worker.ts");
-    const jsWorkerPath = path.join(__dirname, "download-worker.js");
+    const tsWorkerPath = path.join(__dirname, "../workers/download-worker.ts");
+    const jsWorkerPath = path.join(__dirname, "../workers/download-worker.js");
     const hasTsWorker = fs.existsSync(tsWorkerPath);
     const hasJsWorker = fs.existsSync(jsWorkerPath);
     const runningTs = path.extname(__filename) === ".ts";

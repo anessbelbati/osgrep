@@ -16,6 +16,9 @@
     "skipLibCheck": true,
     "moduleResolution": "node"
   },
+  "include": [
+    "src/**/*"
+  ],
   "exclude": [
     "tests",
     "**/*.test.ts",

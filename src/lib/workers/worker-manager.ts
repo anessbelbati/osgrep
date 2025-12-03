@@ -122,14 +122,14 @@ export class WorkerManager {
   }
 
   private handleMessage(message: any) {
-    const { id, hybrids, query, error, memory } = message;
+    const { id, result, query, error, memory } = message;
     const pending = this.pendingRequests.get(id);
     if (!pending) return;
 
     if (pending.timeoutId) clearTimeout(pending.timeoutId);
 
     if (error) pending.reject(new Error(error));
-    else if (hybrids !== undefined) pending.resolve(hybrids);
+    else if (result !== undefined) pending.resolve(result);
     else if (query !== undefined) pending.resolve(query);
     else pending.resolve(undefined);
 

@@ -402,12 +402,7 @@ export async function initialSync(
             profile.sections.createFTSIndex =
                 (profile.sections.createFTSIndex ?? 0) + toMs(ftsStart);
         }
-        const vecStart = PROFILE_ENABLED ? now() : null;
-        await store.createVectorIndex(storeId);
-        if (PROFILE_ENABLED && vecStart && profile) {
-            profile.sections.createVectorIndex =
-                (profile.sections.createVectorIndex ?? 0) + toMs(vecStart);
-        }
+        // Vector index creation removed
     }
 
     if (PROFILE_ENABLED && totalStart && profile) {
@@ -526,4 +521,3 @@ export async function preparedChunksToVectors(
         };
     });
 }
-
