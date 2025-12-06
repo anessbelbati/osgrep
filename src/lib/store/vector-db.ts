@@ -57,6 +57,12 @@ export class VectorDB {
       colbert_scale: 1,
       pooled_colbert_48d: Array(CONFIG.COLBERT_DIM).fill(0),
       doc_token_ids: [],
+      defined_symbols: [],
+      referenced_symbols: [],
+      imports: [],
+      exports: [],
+      role: "",
+      parent_symbol: "",
     };
   }
 
@@ -97,6 +103,20 @@ export class VectorDB {
         new List(new Field("item", new Int32(), true)),
         true,
       ),
+      new Field(
+        "defined_symbols",
+        new List(new Field("item", new Utf8(), true)),
+        true,
+      ),
+      new Field(
+        "referenced_symbols",
+        new List(new Field("item", new Utf8(), true)),
+        true,
+      ),
+      new Field("imports", new List(new Field("item", new Utf8(), true)), true),
+      new Field("exports", new List(new Field("item", new Utf8(), true)), true),
+      new Field("role", new Utf8(), true),
+      new Field("parent_symbol", new Utf8(), true),
     ]);
   }
 
@@ -193,6 +213,12 @@ export class VectorDB {
           ? Array.from(rec.pooled_colbert_48d)
           : undefined,
         doc_token_ids: rec.doc_token_ids ? Array.from(rec.doc_token_ids) : null,
+        defined_symbols: rec.defined_symbols ?? [],
+        referenced_symbols: rec.referenced_symbols ?? [],
+        imports: rec.imports ?? [],
+        exports: rec.exports ?? [],
+        role: rec.role ?? "",
+        parent_symbol: rec.parent_symbol ?? "",
       };
     });
 

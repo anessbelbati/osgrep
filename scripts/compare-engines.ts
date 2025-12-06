@@ -28,7 +28,10 @@ const DEFAULT_DATASET = path.resolve(
   __dirname,
   "../../opencode-old/packages/opencode/src",
 );
-const DEFAULT_OLD_BIN = path.resolve(__dirname, "../../old-osgrep/dist/index.js");
+const DEFAULT_OLD_BIN = path.resolve(
+  __dirname,
+  "../../old-osgrep/dist/index.js",
+);
 const DEFAULT_NEW_BIN = path.resolve(__dirname, "../dist/index.js");
 const DEFAULT_RUNS = Number.parseInt(process.env.RUNS || "1", 10) || 1;
 
@@ -38,12 +41,9 @@ function parseTimeOutput(stderr: string) {
   const sysSec = matchFloat(stderr, /([\d.]+)\s+sys/);
   const maxRssKb = matchInt(
     stderr,
-    /^\s*([\d]+)\s+maximum resident set size/mi,
+    /^\s*([\d]+)\s+maximum resident set size/im,
   );
-  const peakRssKb = matchInt(
-    stderr,
-    /^\s*([\d]+)\s+peak memory footprint/mi,
-  );
+  const peakRssKb = matchInt(stderr, /^\s*([\d]+)\s+peak memory footprint/im);
   return { realSec, userSec, sysSec, maxRssKb, peakRssKb };
 }
 
@@ -138,10 +138,7 @@ function main() {
   });
 
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const summaryPath = path.join(
-    resultsDir,
-    `engine-compare-${timestamp}.json`,
-  );
+  const summaryPath = path.join(resultsDir, `engine-compare-${timestamp}.json`);
   const latestPath = path.join(resultsDir, `engine-compare-latest.json`);
 
   const payload = {

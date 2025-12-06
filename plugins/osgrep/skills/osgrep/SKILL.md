@@ -10,8 +10,8 @@ Use this to find code by **concept** or **behavior** (e.g., "where is auth valid
 
 Example:
 ```bash
-osgrep "how are plugins loaded"
-osgrep "how are plugins loaded" packages/transformers.js/src
+osgrep "how are plugins loaded" --json
+osgrep "how are plugins loaded" packages/transformers.js/src --json
 ```
 
 ## Strategy for Different Query Types
@@ -39,11 +39,19 @@ osgrep "how are plugins loaded" packages/transformers.js/src
 3. **One Search, One Read:** Use osgrep to pinpoint the best file, then read it fully.
 
 ## Output Format
+Always use the `--json` flag for machine-readable output.
 
-Returns: `path/to/file:line [Tags] Code Snippet`
+Returns a JSON array of objects with the following key fields:
+- `path`: File path.
+- `role`: **CRITICAL**. `ORCHESTRATION` (high-level logic), `DEFINITION` (types/classes), or `IMPLEMENTATION`.
+- `confidence`: `High`, `Medium`, or `Low`.
+- `defined_symbols` / `referenced_symbols`: Useful for understanding code relationships.
+- `text`: The code snippet (truncated).
 
-- `[Definition]`: Semantic search detected a class/function here. High relevance.
-- `...`: **Truncation Marker**. Snippet is incomplete—use `read_file` for full context.
+**Interpretation Guide:**
+- **`ORCHESTRATION` + `High` Confidence:** This is likely the main logic you are looking for. Read this file first.
+- **`DEFINITION`:** Good for understanding types, but might not contain the flow.
+- **`Low` Confidence:** Read only if no better matches found.
 
 ## Tips
 

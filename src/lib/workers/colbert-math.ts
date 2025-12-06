@@ -17,10 +17,15 @@ function loadSkipIds(): Set<number> {
   const localSkipPath = path.join(localColbert, "skiplist.json");
 
   // Try local first, then global
-  const globalBasePath = path.join(PATHS.models, ...MODEL_IDS.colbert.split("/"));
+  const globalBasePath = path.join(
+    PATHS.models,
+    ...MODEL_IDS.colbert.split("/"),
+  );
   const globalSkipPath = path.join(globalBasePath, "skiplist.json");
 
-  const skipPath = fs.existsSync(localSkipPath) ? localSkipPath : globalSkipPath;
+  const skipPath = fs.existsSync(localSkipPath)
+    ? localSkipPath
+    : globalSkipPath;
 
   if (fs.existsSync(skipPath)) {
     try {

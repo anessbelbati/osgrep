@@ -13,7 +13,7 @@ export interface ProjectPaths {
 
 export function findProjectRoot(startDir = process.cwd()): string | null {
   const start = path.resolve(startDir);
-  
+
   // Check if there's an existing .osgrep directory in the current directory
   const osgrepDir = path.join(start, ".osgrep");
   if (
@@ -22,7 +22,7 @@ export function findProjectRoot(startDir = process.cwd()): string | null {
   ) {
     return start;
   }
-  
+
   // Otherwise, use the current directory as the root (don't walk up)
   // This allows separate indexes per subdirectory and matches user expectations
   return start;

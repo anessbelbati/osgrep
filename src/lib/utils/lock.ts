@@ -86,7 +86,7 @@ export async function acquireWriterLock(lockDir: string): Promise<LockHandle> {
 
 export async function acquireWriterLockWithRetry(
   lockDir: string,
-  options?: { maxRetries?: number; retryDelayMs?: number }
+  options?: { maxRetries?: number; retryDelayMs?: number },
 ): Promise<LockHandle> {
   const maxRetries = options?.maxRetries ?? 5;
   const retryDelayMs = options?.retryDelayMs ?? 1000;
@@ -95,11 +95,14 @@ export async function acquireWriterLockWithRetry(
     try {
       return await acquireWriterLock(lockDir);
     } catch (err) {
-      const isLockHeld = err instanceof Error && err.message.includes("lock already held");
+      const isLockHeld =
+        err instanceof Error && err.message.includes("lock already held");
       if (!isLockHeld || attempt === maxRetries - 1) {
         throw err;
       }
-      await new Promise((resolve) => setTimeout(resolve, retryDelayMs * (attempt + 1)));
+      await new Promise((resolve) =>
+        setTimeout(resolve, retryDelayMs * (attempt + 1)),
+      );
     }
   }
   throw new Error("Failed to acquire lock after retries");

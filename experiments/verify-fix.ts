@@ -1,7 +1,10 @@
 import { performance } from "node:perf_hooks";
-import { VectorDB } from "../src/lib/store/vector-db";
 import { Searcher } from "../src/lib/search/searcher";
-import { ensureProjectPaths, findProjectRoot } from "../src/lib/utils/project-root";
+import { VectorDB } from "../src/lib/store/vector-db";
+import {
+  ensureProjectPaths,
+  findProjectRoot,
+} from "../src/lib/utils/project-root";
 
 // Force old-engine style boosts for this check.
 process.env.OSGREP_CODE_BOOST = "1.25";

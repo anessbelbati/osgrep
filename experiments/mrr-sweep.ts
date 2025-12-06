@@ -1,10 +1,13 @@
 import { performance } from "node:perf_hooks";
 import { cases, evaluateCase } from "../src/eval";
-import { VectorDB } from "../src/lib/store/vector-db";
 import { Searcher } from "../src/lib/search/searcher";
+import type { SearchFilter } from "../src/lib/store/types";
+import { VectorDB } from "../src/lib/store/vector-db";
+import {
+  ensureProjectPaths,
+  findProjectRoot,
+} from "../src/lib/utils/project-root";
 import { destroyWorkerPool } from "../src/lib/workers/pool";
-import { ensureProjectPaths, findProjectRoot } from "../src/lib/utils/project-root";
-import { type SearchFilter } from "../src/lib/store/types";
 
 type Scenario = {
   name: string;
@@ -25,10 +28,7 @@ function topPaths(response: { data: any[] }, k = 3): Ranked[] {
   }));
 }
 
-function targetRank(
-  response: { data: any[] },
-  expectedPath: string,
-): number {
+function targetRank(response: { data: any[] }, expectedPath: string): number {
   const expectedPaths = expectedPath
     .split("|")
     .map((p) => p.trim().toLowerCase())
@@ -130,9 +130,7 @@ async function runScenario(scenario: Scenario) {
 
     const res = await searcher.search(c.query, 20, scenario.searchOptions);
     rerankTop = topPaths(res);
-    const rerankRank = enableDiagnostics
-      ? targetRank(res, c.expectedPath)
-      : -1;
+    const rerankRank = enableDiagnostics ? targetRank(res, c.expectedPath) : -1;
 
     if (enableDiagnostics && fusedTop.length && rerankTop.length) {
       total += 1;
@@ -200,7 +198,9 @@ async function runScenario(scenario: Scenario) {
   const found = results.filter((r) => r.found).length;
 
   console.log(`\n=== ${scenario.name} ===`);
-  console.log(`MRR: ${mrr.toFixed(3)} | Recall@10: ${recallAt10.toFixed(3)} | Avg ms: ${avgTime.toFixed(0)} | Found: ${found}/${results.length}`);
+  console.log(
+    `MRR: ${mrr.toFixed(3)} | Recall@10: ${recallAt10.toFixed(3)} | Avg ms: ${avgTime.toFixed(0)} | Found: ${found}/${results.length}`,
+  );
   if (enableDiagnostics && total > 0) {
     console.log(
       `Rerank dropped fused#1 out of top3 for ${drops}/${total} queries; promoted new #1 outside fused top3 for ${lifts}/${total} queries`,

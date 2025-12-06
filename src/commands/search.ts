@@ -1,12 +1,15 @@
 import * as path from "node:path";
 import type { Command } from "commander";
 import { Command as CommanderCommand } from "commander";
+import { GraphBuilder } from "../lib/graph/graph-builder";
 import { ensureGrammars } from "../lib/index/grammar-loader";
 import {
   createIndexingSpinner,
   formatDryRunSummary,
 } from "../lib/index/sync-helpers";
 import { initialSync } from "../lib/index/syncer";
+import { formatTrace } from "../lib/output/formatter";
+import { formatJson } from "../lib/output/json-formatter";
 import { Searcher } from "../lib/search/searcher";
 import { ensureSetup } from "../lib/setup/setup-helpers";
 import type { FileMetadata, SearchResponse } from "../lib/store/types";
@@ -47,6 +50,8 @@ export const search: Command = new CommanderCommand("search")
   .option("--scores", "Show relevance scores", false)
   .option("--compact", "Show file paths only", false)
   .option("--plain", "Disable ANSI colors and use simpler formatting", false)
+  .option("--trace", "Trace the call graph for a symbol", false)
+  .option("--json", "Output results in JSON format", false)
   .option(
     "-s, --sync",
     "Syncs the local files to the store before searching",
@@ -71,6 +76,8 @@ export const search: Command = new CommanderCommand("search")
       plain: boolean;
       sync: boolean;
       dryRun: boolean;
+      trace: boolean;
+      json: boolean;
     } = cmd.optsWithGlobals();
 
     if (exec_path?.startsWith("--")) {
@@ -90,6 +97,20 @@ export const search: Command = new CommanderCommand("search")
       process.env.OSGREP_PROJECT_ROOT = projectRoot;
 
       vectorDb = new VectorDB(paths.lancedbDir);
+
+      if (options.trace) {
+        const graphBuilder = new GraphBuilder(vectorDb);
+        const graph = await graphBuilder.buildGraph(pattern);
+        if (options.json) {
+          console.log(
+            formatJson({ graph, metadata: { count: 1, query: pattern } }),
+          );
+        } else {
+          console.log(formatTrace(graph));
+        }
+        return;
+      }
+
       const searcher = new Searcher(vectorDb);
 
       const hasRows = await vectorDb.hasAnyRows();
@@ -161,6 +182,16 @@ export const search: Command = new CommanderCommand("search")
         exec_path ? path.relative(projectRoot, path.resolve(exec_path)) : "",
       );
 
+      if (options.json) {
+        console.log(
+          formatJson({
+            results: searchResult.data,
+            metadata: { count: searchResult.data.length, query: pattern },
+          }),
+        );
+        return;
+      }
+
       if (!searchResult.data.length) {
         console.log("No matches found.");
         return;
@@ -169,17 +200,24 @@ export const search: Command = new CommanderCommand("search")
       const isTTY = process.stdout.isTTY;
       const shouldBePlain = options.plain || !isTTY;
 
-      const mappedResults = toTextResults(searchResult.data);
-
-      const output = formatTextResults(mappedResults, pattern, projectRoot, {
-        isPlain: shouldBePlain,
-        compact: options.compact,
-        content: options.content,
-        perFile: parseInt(options.perFile, 10),
-        showScores: options.scores,
-      });
-
-      console.log(output);
+      if (shouldBePlain) {
+        const mappedResults = toTextResults(searchResult.data);
+        const output = formatTextResults(mappedResults, pattern, projectRoot, {
+          isPlain: true,
+          compact: options.compact,
+          content: options.content,
+          perFile: parseInt(options.perFile, 10),
+          showScores: options.scores,
+        });
+        console.log(output);
+      } else {
+        // Use new holographic formatter for TTY
+        const { formatResults } = await import("../lib/output/formatter");
+        const output = formatResults(searchResult.data, projectRoot, {
+          content: options.content,
+        });
+        console.log(output);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
       console.error("Search failed:", message);

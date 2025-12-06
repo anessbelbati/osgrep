@@ -145,6 +145,7 @@ export class WorkerOrchestrator {
         isAnchor:
           chunkWithContext.isAnchor === true ||
           (anchorChunk ? idx === 0 : false),
+        imports: metadata.imports,
       };
     });
   }
@@ -176,6 +177,12 @@ export class WorkerOrchestrator {
         chunk_index: chunk.chunkIndex,
         is_anchor: chunk.isAnchor === true,
         chunk_type: typeof chunk.type === "string" ? chunk.type : undefined,
+        complexity: chunk.complexity,
+        is_exported: chunk.isExported,
+        defined_symbols: chunk.definedSymbols,
+        referenced_symbols: chunk.referencedSymbols,
+        role: chunk.role,
+        parent_symbol: chunk.parentSymbol,
       });
     }
 

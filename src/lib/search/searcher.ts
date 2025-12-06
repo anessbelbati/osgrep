@@ -9,6 +9,7 @@ import type {
 import type { VectorDB } from "../store/vector-db";
 import { escapeSqlString, normalizePath } from "../utils/filter-builder";
 import { getWorkerPool } from "../workers/pool";
+import { detectIntent, type SearchIntent } from "./intent";
 
 export class Searcher {
   constructor(private db: VectorDB) {}
@@ -35,12 +36,22 @@ export class Searcher {
         num_lines: Math.max(1, endLine - startLine + 1),
         type: record.chunk_type,
       },
+      complexity: record.complexity,
+      is_exported: record.is_exported,
+      defined_symbols: record.defined_symbols,
+      referenced_symbols: record.referenced_symbols,
+      imports: record.imports,
+      exports: record.exports,
+      role: record.role,
+      parent_symbol: record.parent_symbol,
+      context: record.context_prev ? [record.context_prev] : [], // Simplistic mapping for now
     };
   }
 
   private applyStructureBoost(
     record: Partial<VectorRecord>,
     score: number,
+    intent?: SearchIntent,
   ): number {
     let adjusted = score;
 
@@ -61,8 +72,45 @@ export class Searcher {
         "type_alias",
       ];
       if (boosted.includes(chunkType)) {
-        const boostFactor =
-          Number.parseFloat(process.env.OSGREP_CODE_BOOST ?? "") || 1.05;
+        let boostFactor = 1.0;
+
+        // Base boost
+        boostFactor *= 1.1;
+
+        // --- Role Boost ---
+        if (record.role === "ORCHESTRATION") {
+          boostFactor *= 1.5;
+        } else if (record.role === "DEFINITION") {
+          boostFactor *= 1.2;
+        } else if (record.role === "IMPLEMENTATION") {
+          boostFactor *= 1.1;
+        }
+
+        // --- Complexity/Orchestration Boost (User Requested) ---
+        const refs = record.referenced_symbols?.length || 0;
+
+        if (refs > 5) {
+          // Small boost for non-trivial functions
+          boostFactor *= 1.1;
+        }
+        if (refs > 15) {
+          // Massive boost for Orchestrators
+          boostFactor *= 1.25;
+        }
+
+        // Intent-based boosts
+        if (intent) {
+          if (intent.type === "DEFINITION" && record.role === "DEFINITION") {
+            boostFactor *= 1.2;
+          }
+          if (intent.type === "FLOW" && record.role === "ORCHESTRATION") {
+            boostFactor *= 1.4;
+          }
+          if (intent.type === "USAGE" && record.role === "IMPLEMENTATION") {
+            boostFactor *= 1.2;
+          }
+        }
+
         adjusted *= boostFactor;
       }
     }
@@ -71,13 +119,13 @@ export class Searcher {
 
     // Use path-segment and filename patterns to avoid false positives like "latest"
     const isTestPath =
-      /(^|\/)(__tests__|tests?|specs?)(\/|$)/i.test(pathStr) ||
+      /(^|\/)(__tests__|tests?|specs?|benchmark)(\/|$)/i.test(pathStr) ||
       /\.(test|spec)\.[cm]?[jt]sx?$/i.test(pathStr);
 
     if (isTestPath) {
       const testPenalty =
-        Number.parseFloat(process.env.OSGREP_TEST_PENALTY ?? "") || 0.9;
-      adjusted *= testPenalty; // Downweight tests
+        Number.parseFloat(process.env.OSGREP_TEST_PENALTY ?? "") || 0.5;
+      adjusted *= testPenalty;
     }
     if (
       pathStr.endsWith(".md") ||
@@ -88,10 +136,58 @@ export class Searcher {
       pathStr.includes("/docs/")
     ) {
       const docPenalty =
-        Number.parseFloat(process.env.OSGREP_DOC_PENALTY ?? "") || 0.85;
+        Number.parseFloat(process.env.OSGREP_DOC_PENALTY ?? "") || 0.6;
       adjusted *= docPenalty; // Downweight docs/data
     }
+    // Import-only penalty
+    if ((record.content || "").length < 50 && !record.is_exported) {
+      adjusted *= 0.9;
+    }
+
     return adjusted;
+  }
+
+  private deduplicateResults(
+    results: { record: VectorRecord; score: number }[],
+  ): { record: VectorRecord; score: number }[] {
+    const seenIds = new Set<string>();
+    const seenContent = new Map<string, { start: number; end: number }[]>();
+    const deduped: { record: VectorRecord; score: number }[] = [];
+
+    for (const item of results) {
+      // Hard Dedup: ID
+      if (item.record.id && seenIds.has(item.record.id)) continue;
+      if (item.record.id) seenIds.add(item.record.id);
+
+      // Overlap Dedup
+      const path = item.record.path || "";
+      const start = item.record.start_line || 0;
+      const end = item.record.end_line || 0;
+      const range = end - start;
+
+      const existing = seenContent.get(path) || [];
+      let isOverlapping = false;
+
+      for (const other of existing) {
+        const otherRange = other.end - other.start;
+        const overlapStart = Math.max(start, other.start);
+        const overlapEnd = Math.min(end, other.end);
+        const overlap = Math.max(0, overlapEnd - overlapStart);
+
+        // If overlap is > 50% of the smaller chunk
+        if (overlap > 0.5 * Math.min(range, otherRange)) {
+          isOverlapping = true;
+          break;
+        }
+      }
+
+      if (!isOverlapping) {
+        deduped.push(item);
+        existing.push({ start, end });
+        seenContent.set(path, existing);
+      }
+    }
+    return deduped;
   }
 
   private ftsIndexChecked = false;
@@ -102,9 +198,11 @@ export class Searcher {
     _search_options?: { rerank?: boolean },
     _filters?: SearchFilter,
     pathPrefix?: string,
+    intent?: SearchIntent,
   ): Promise<SearchResponse> {
     const finalLimit = top_k ?? 10;
     const doRerank = _search_options?.rerank ?? true;
+    const searchIntent = intent || detectIntent(query);
 
     const pool = getWorkerPool();
 
@@ -121,9 +219,45 @@ export class Searcher {
       );
     }
 
-    const whereClause = pathPrefix
-      ? `path LIKE '${escapeSqlString(normalizePath(pathPrefix))}%'`
-      : undefined;
+    const whereClauseParts: string[] = [];
+    if (pathPrefix) {
+      whereClauseParts.push(
+        `path LIKE '${escapeSqlString(normalizePath(pathPrefix))}%'`,
+      );
+    }
+
+    // Handle --def (definition) filter
+    const defFilter = _filters?.def;
+    if (typeof defFilter === "string" && defFilter) {
+      whereClauseParts.push(
+        `array_contains(defined_symbols, '${escapeSqlString(defFilter)}')`,
+      );
+    } else if (
+      searchIntent.type === "DEFINITION" &&
+      searchIntent.filters?.definitionsOnly
+    ) {
+      // If intent is DEFINITION but no specific symbol provided, filter by role
+      whereClauseParts.push(
+        `(role = 'DEFINITION' OR array_length(defined_symbols) > 0)`,
+      );
+    }
+
+    // Handle --ref (reference) filter
+    const refFilter = _filters?.ref;
+    if (typeof refFilter === "string" && refFilter) {
+      whereClauseParts.push(
+        `array_contains(referenced_symbols, '${escapeSqlString(refFilter)}')`,
+      );
+    } else if (
+      searchIntent.type === "USAGE" &&
+      searchIntent.filters?.usagesOnly
+    ) {
+      // If intent is USAGE, we might want to filter out definitions?
+      // For now, let's just rely on boosting.
+    }
+
+    const whereClause =
+      whereClauseParts.length > 0 ? whereClauseParts.join(" AND ") : undefined;
 
     const envPreK = Number.parseInt(process.env.OSGREP_PRE_K ?? "", 10);
     const PRE_RERANK_K =
@@ -208,9 +342,7 @@ export class Searcher {
       10,
     );
     const RERANK_TOP =
-      Number.isFinite(envRerankTop) && envRerankTop > 0
-        ? envRerankTop
-        : 20;
+      Number.isFinite(envRerankTop) && envRerankTop > 0 ? envRerankTop : 20;
     const envBlend = Number.parseFloat(process.env.OSGREP_RERANK_BLEND ?? "");
     const FUSED_WEIGHT =
       Number.isFinite(envBlend) && envBlend >= 0 ? envBlend : 0.5;
@@ -248,7 +380,8 @@ export class Searcher {
           query: queryMatrixRaw,
           docs: rerankCandidates.map((doc) => ({
             colbert: (doc.colbert as Buffer | Int8Array | number[]) ?? [],
-            scale: typeof doc.colbert_scale === "number" ? doc.colbert_scale : 1,
+            scale:
+              typeof doc.colbert_scale === "number" ? doc.colbert_scale : 1,
             token_ids: Array.isArray((doc as any).doc_token_ids)
               ? ((doc as any).doc_token_ids as number[])
               : undefined,
@@ -264,7 +397,7 @@ export class Searcher {
         });
 
     type ScoredItem = {
-      record: typeof rerankCandidates[number];
+      record: (typeof rerankCandidates)[number];
       score: number;
     };
 
@@ -273,12 +406,15 @@ export class Searcher {
       const key = doc.id || `${doc.path}:${doc.chunk_index}`;
       const fusedScore = candidateScores.get(key) ?? 0;
       const blended = base + FUSED_WEIGHT * fusedScore;
-      const boosted = this.applyStructureBoost(doc, blended);
+      const boosted = this.applyStructureBoost(doc, blended, searchIntent);
       return { record: doc, score: boosted };
     });
 
     // Note: "boosted" was not previously declared -- fix to use "scored"
     scored.sort((a: ScoredItem, b: ScoredItem) => b.score - a.score);
+
+    // Item 11: Intelligent Deduplication
+    const uniqueScored = this.deduplicateResults(scored);
 
     // Item 10: Per-file diversification
     const seenFiles = new Map<string, number>();
@@ -288,11 +424,9 @@ export class Searcher {
       10,
     );
     const MAX_PER_FILE =
-      Number.isFinite(envMaxPerFile) && envMaxPerFile > 0
-        ? envMaxPerFile
-        : 3;
+      Number.isFinite(envMaxPerFile) && envMaxPerFile > 0 ? envMaxPerFile : 3;
 
-    for (const item of scored) {
+    for (const item of uniqueScored) {
       const path = item.record.path || "";
       const count = seenFiles.get(path) || 0;
       if (count < MAX_PER_FILE) {
@@ -309,8 +443,24 @@ export class Searcher {
       colbert: undefined,
     }));
 
+    // Item 12: Score Calibration
+    const maxScore = finalResults.length > 0 ? finalResults[0]._score : 1.0;
+
     return {
-      data: finalResults.map((r: typeof finalResults[number]) => this.mapRecordToChunk(r, r._score || 0)),
+      data: finalResults.map((r: (typeof finalResults)[number]) => {
+        const chunk = this.mapRecordToChunk(r, r._score || 0);
+
+        // Normalize score relative to top result
+        const normalized = maxScore > 0 ? r._score / maxScore : 0;
+
+        let confidence: "High" | "Medium" | "Low" = "Low";
+        if (normalized > 0.8) confidence = "High";
+        else if (normalized > 0.5) confidence = "Medium";
+
+        chunk.score = normalized;
+        chunk.confidence = confidence;
+        return chunk;
+      }),
     };
   }
 }

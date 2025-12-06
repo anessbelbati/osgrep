@@ -104,7 +104,7 @@ export async function initialSync(
         metaCache.close();
         try {
           fs.rmSync(paths.lmdbPath, { force: true });
-        } catch { }
+        } catch {}
         metaCache = new MetaCache(paths.lmdbPath);
       }
     }
@@ -115,11 +115,7 @@ export async function initialSync(
       onlyFiles: true,
       unique: true,
       followSymbolicLinks: false,
-      ignore: [
-        ...DEFAULT_IGNORE_PATTERNS,
-        ".git/**",
-        ".osgrep/**",
-      ],
+      ignore: [...DEFAULT_IGNORE_PATTERNS, ".git/**", ".osgrep/**"],
       suppressErrors: true,
       globstar: true,
     };
@@ -191,8 +187,7 @@ export async function initialSync(
     };
 
     const isTimeoutError = (err: unknown) =>
-      err instanceof Error &&
-      err.message?.toLowerCase().includes("timed out");
+      err instanceof Error && err.message?.toLowerCase().includes("timed out");
 
     const processFileWithRetry = async (
       relPath: string,
@@ -261,7 +256,9 @@ export async function initialSync(
             return;
           }
 
-          const cached = treatAsEmptyCache ? undefined : metaCache!.get(relPath);
+          const cached = treatAsEmptyCache
+            ? undefined
+            : metaCache!.get(relPath);
 
           if (
             cached &&

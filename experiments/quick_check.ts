@@ -1,5 +1,8 @@
 import { VectorDB } from "../src/lib/store/vector-db";
-import { ensureProjectPaths, findProjectRoot } from "../src/lib/utils/project-root";
+import {
+  ensureProjectPaths,
+  findProjectRoot,
+} from "../src/lib/utils/project-root";
 
 async function main() {
   const root = process.cwd();
@@ -20,7 +23,9 @@ async function main() {
       len = Number((col as { length: number }).length) || 0;
     else if (col && col.type === "Buffer" && Array.isArray(col.data))
       len = col.data.length;
-    console.log(`#${i} path=${r.path}, colbertLen=${len}, scale=${r.colbert_scale}`);
+    console.log(
+      `#${i} path=${r.path}, colbertLen=${len}, scale=${r.colbert_scale}`,
+    );
   });
 }
 main().catch(console.error);

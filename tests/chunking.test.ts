@@ -56,7 +56,7 @@ function example() {}`;
     expect(anchor.isAnchor).toBe(true);
     expect(anchor.context).toContain("Anchor");
     expect(anchor.content).toContain("Imports:");
-    expect(anchor.content).toContain("Exports:");
+    expect(anchor.content).toContain("Exports: value");
     expect(anchor.content).toContain("Top comments:");
   });
 
@@ -71,7 +71,8 @@ function example() {}`;
       },
       "/repo/path/file.ts",
     );
-    expect(displayText.startsWith("File: /repo/path/file.ts")).toBe(true);
-    expect(displayText).toContain("---");
+    expect(displayText).toContain("// /repo/path/file.ts");
+    expect(displayText).toContain("File: /repo/path/file.ts");
+    expect(displayText).toContain("code");
   });
 });

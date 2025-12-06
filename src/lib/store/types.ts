@@ -17,6 +17,14 @@ export type PreparedChunk = {
   context_next?: string;
   chunk_type?: string;
   display_text?: string;
+  complexity?: number;
+  is_exported?: boolean;
+  defined_symbols?: string[];
+  referenced_symbols?: string[];
+  imports?: string[];
+  exports?: string[];
+  role?: string;
+  parent_symbol?: string;
 };
 
 export type VectorRecord = PreparedChunk & {
@@ -43,9 +51,19 @@ export interface ChunkType extends MetadataRecord {
   type: "text" | "image_url" | "audio_url" | "video_url";
   text?: string;
   score: number;
+  confidence?: "High" | "Medium" | "Low";
   metadata?: FileMetadata;
   generated_metadata?: ChunkGeneratedMetadata;
   chunk_index?: number;
+  complexity?: number;
+  is_exported?: boolean;
+  defined_symbols?: string[];
+  referenced_symbols?: string[];
+  imports?: string[];
+  exports?: string[];
+  role?: string;
+  parent_symbol?: string;
+  context?: string[];
 }
 
 export interface SearchResponse {

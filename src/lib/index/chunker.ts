@@ -22,12 +22,20 @@ export interface Chunk {
     | "block"
     | "other";
   context?: string[];
+  docstring?: string;
+  complexity?: number;
+  isExported?: boolean;
+  definedSymbols?: string[];
+  referencedSymbols?: string[];
+  role?: string;
+  parentSymbol?: string;
 }
 
 export type ChunkWithContext = Chunk & {
   context: string[];
   chunkIndex?: number;
   isAnchor?: boolean;
+  imports?: string[];
 };
 
 export interface FileMetadata {
@@ -52,6 +60,7 @@ interface TreeSitterNode {
   namedChildren?: TreeSitterNode[];
   parent?: TreeSitterNode;
   childForFieldName?: (field: string) => TreeSitterNode | null;
+  previousSibling?: TreeSitterNode | null;
 }
 
 // TreeSitter Parser and Language types
@@ -75,8 +84,34 @@ export function formatChunkText(
   if (!hasFileLabel) {
     breadcrumb.unshift(fileLabel);
   }
+
+  const sections: string[] = [];
+
+  // 1. File path (always first)
+  sections.push(`// ${filePath}`);
+
+  // 2. Imports (if available)
+  if (chunk.imports && chunk.imports.length > 0) {
+    sections.push(
+      chunk.imports
+        .map((imp) => (imp.startsWith("import") ? imp : `import ${imp}`))
+        .join("\n"),
+    );
+  }
+
+  // 3. Breadcrumb
   const header = breadcrumb.length > 0 ? breadcrumb.join(" > ") : fileLabel;
-  const displayText = `${header}\n---\n${chunk.content}`;
+  sections.push(header);
+
+  // 4. Code content
+  sections.push(chunk.content);
+
+  // 5. Docstring (if available)
+  if (chunk.docstring) {
+    sections.push(chunk.docstring);
+  }
+
+  const displayText = sections.join("\n");
 
   // Embed the rich, contextual text so rerank can see breadcrumbs/imports/etc.
   const content = displayText;
@@ -363,14 +398,22 @@ export class TreeSitterChunker {
       return name ? `Symbol: ${name}` : null;
     };
 
-    const addChunk = (node: TreeSitterNode, context: string[]) => {
-      chunks.push({
-        content: node.text,
-        startLine: node.startPosition.row,
-        endLine: node.endPosition.row,
-        type: classify(node),
-        context,
-      });
+    const getDocstring = (node: TreeSitterNode): string | undefined => {
+      const comments: string[] = [];
+      let current = node.previousSibling;
+      while (current) {
+        const t = current.type;
+        if (t.includes("comment")) {
+          comments.unshift(current.text);
+          current = current.previousSibling;
+        } else if (current.text.trim().length === 0) {
+          // whitespace
+          current = current.previousSibling;
+        } else {
+          break;
+        }
+      }
+      return comments.length > 0 ? comments.join("\n") : undefined;
     };
 
     const visit = (node: TreeSitterNode, stack: string[]) => {
@@ -384,8 +427,12 @@ export class TreeSitterChunker {
         node.type === "export_statement" ||
         node.type === "export_declaration"
       ) {
-        // Simple export extraction
-        metadata.exports.push(node.text.trim().split("\n")[0]);
+        // Extract exported identifier
+        const effective = unwrapExport(node);
+        const name = getNodeName(effective);
+        if (name) {
+          metadata.exports.push(name);
+        }
       } else if (node.type.includes("comment")) {
         if (node.startPosition.row < 10) {
           // Only top comments
@@ -402,7 +449,114 @@ export class TreeSitterChunker {
         sawDefinition = true;
         const label = labelForNode(effective);
         const context = [...stack, ...(label ? [label] : [])];
-        addChunk(effective, context);
+
+        const docstring = getDocstring(node);
+
+        // Calculate complexity
+        const getComplexity = (n: TreeSitterNode): number => {
+          let complexity = 1;
+          const complexTypes = [
+            "if_statement",
+            "for_statement",
+            "while_statement",
+            "switch_statement",
+            "catch_clause",
+            "conditional_expression",
+            "binary_expression", // simplistic, but counts logical ops usually
+          ];
+
+          const countComplexity = (curr: TreeSitterNode) => {
+            if (complexTypes.includes(curr.type)) {
+              if (curr.type === "binary_expression") {
+                const op = curr.childForFieldName
+                  ? curr.childForFieldName("operator")
+                  : null;
+                if (["&&", "||", "??"].includes(op?.text || "")) {
+                  complexity++;
+                }
+              } else {
+                complexity++;
+              }
+            }
+            for (const child of curr.namedChildren ?? []) {
+              countComplexity(child);
+            }
+          };
+          countComplexity(n);
+          return complexity;
+        };
+
+        const complexity = getComplexity(effective);
+
+        // Check if exported
+        const name = getNodeName(effective);
+        const isExported = name ? metadata.exports.includes(name) : false;
+
+        // Extract symbols
+        const definedSymbols: string[] = [];
+        if (name) definedSymbols.push(name);
+
+        const referencedSymbols: string[] = [];
+        const extractRefs = (n: TreeSitterNode) => {
+          // Handle JS/TS (call_expression) and Python (call)
+          if (n.type === "call_expression" || n.type === "call") {
+            const func = n.childForFieldName
+              ? n.childForFieldName("function")
+              : null;
+            if (func) {
+              let funcName = func.text;
+
+              // Handle member access (obj.method) to extract just 'method'
+              if (func.type === "member_expression") {
+                // JS/TS: object.property
+                const prop = func.childForFieldName
+                  ? func.childForFieldName("property")
+                  : null;
+                if (prop) funcName = prop.text;
+              } else if (func.type === "attribute") {
+                // Python: object.attribute
+                const attr = func.childForFieldName
+                  ? func.childForFieldName("attribute")
+                  : null;
+                if (attr) funcName = attr.text;
+              }
+
+              referencedSymbols.push(funcName);
+            }
+          }
+          for (const child of n.namedChildren ?? []) {
+            extractRefs(child);
+          }
+        };
+        extractRefs(effective);
+
+        // Classify role
+        let role = "IMPLEMENTATION";
+        if (isDefinition) role = "DEFINITION";
+        if (complexity > 5 && referencedSymbols.length > 5)
+          role = "ORCHESTRATION";
+        if (effective.type.includes("import")) role = "IMPORT";
+
+        chunks.push({
+          content: node.text,
+          startLine: node.startPosition.row,
+          endLine: node.endPosition.row,
+          type: classify(effective),
+          context,
+          docstring,
+          complexity,
+          isExported,
+          definedSymbols,
+          referencedSymbols,
+          role,
+          parentSymbol:
+            stack.length > 1
+              ? stack[stack.length - 1].replace(
+                  /^(Class|Method|Function|Interface|Type): /,
+                  "",
+                )
+              : undefined,
+        });
         nextStack = context;
       }
 
@@ -417,6 +571,7 @@ export class TreeSitterChunker {
       const effective = unwrapExport(child);
       const isDefinition =
         isDefType(effective.type) || isTopLevelValueDef(effective);
+
       if (!isDefinition) continue;
 
       if (child.startIndex > cursorIndex) {
@@ -483,11 +638,10 @@ export class TreeSitterChunker {
       if (subLines.length < 3 && i > 0) continue;
 
       subChunks.push({
+        ...chunk,
         content: subLines.join("\n"),
         startLine: chunk.startLine + i,
         endLine: chunk.startLine + end,
-        type: chunk.type,
-        context: chunk.context,
       });
     }
 
@@ -509,11 +663,10 @@ export class TreeSitterChunker {
       const subLineCount = sub.split("\n").length;
 
       res.push({
+        ...chunk,
         content: sub,
         startLine: chunk.startLine + prefixLines,
         endLine: chunk.startLine + prefixLines + subLineCount,
-        type: chunk.type,
-        context: chunk.context,
       });
     }
 
