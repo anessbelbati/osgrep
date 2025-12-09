@@ -236,7 +236,7 @@ export class Skeletonizer {
 
       return {
         success: true,
-        skeleton: `${formatSkeletonHeader(filePath, tokenEstimate)}\n${skeleton}`,
+        skeleton: `${formatSkeletonHeader(filePath, tokenEstimate, langDef.id)}\n${skeleton}`,
         tokenEstimate,
         symbolCount: elisions.length,
         language: langDef.id,
@@ -410,7 +410,9 @@ export class Skeletonizer {
       skeleton: preview,
       tokenEstimate: Math.ceil(preview.length / 4),
       symbolCount: 0,
-      language: path.extname(filePath),
+      language: reason.includes("Unknown file extension")
+        ? path.extname(filePath)
+        : "unknown",
       error: reason,
     };
   }
@@ -467,6 +469,26 @@ export class Skeletonizer {
             seen.add(funcName);
             refs.push(funcName);
           }
+        }
+      } else if (
+        n.type === "method_invocation" || // Java
+        n.type === "invocation_expression" // C#
+      ) {
+        // Java/C# method calls
+        const nameNode = n.childForFieldName?.("name") || n.childForFieldName?.("function");
+        if (nameNode) {
+          refs.push(nameNode.text);
+          seen.add(nameNode.text);
+        }
+      } else if (
+        n.type === "method_call" || // Ruby
+        n.type === "command" || // Ruby
+        n.type === "command_call" // Ruby
+      ) {
+        const nameNode = n.childForFieldName?.("method") || n.childForFieldName?.("name");
+        if (nameNode) {
+          refs.push(nameNode.text);
+          seen.add(nameNode.text);
         }
       }
 

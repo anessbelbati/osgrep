@@ -71,14 +71,15 @@ export const mcp = new Command("mcp")
 
     server.setRequestHandler(CallToolRequestSchema, async (_request) => {
       return {
-        result: "Not implemented",
+        content: [{ type: "text", text: "Not implemented" }],
+        isError: true,
       };
     });
 
     await server.connect(transport);
 
     const startBackgroundSync = async () => {
-      console.log("[SYNC] Scheduling initial sync in 5 seconds...");
+      console.log("[SYNC] Scheduling initial sync in 1 second...");
 
       setTimeout(async () => {
         console.log("[SYNC] Starting file sync...");

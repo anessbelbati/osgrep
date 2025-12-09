@@ -286,7 +286,6 @@ async function outputSkeletons(
   if (filesToProcess.length === 0) {
     console.log("No skeleton matches found.");
     return;
-    return;
   }
 
   // Reuse or init skeletonizer for fallbacks
@@ -468,9 +467,9 @@ export const search: Command = new CommanderCommand("search")
           if (options.compact) {
             const compactText = compactHits.length
               ? formatCompactTable(compactHits, projectRootForServer, pattern, {
-                  isTTY: !!process.stdout.isTTY,
-                  plain: !!options.plain,
-                })
+                isTTY: !!process.stdout.isTTY,
+                plain: !!options.plain,
+              })
               : "No matches found.";
             console.log(compactText);
             return; // EXIT
@@ -627,9 +626,9 @@ export const search: Command = new CommanderCommand("search")
       const compactText =
         options.compact && compactHits.length
           ? formatCompactTable(compactHits, projectRoot, pattern, {
-              isTTY: !!process.stdout.isTTY,
-              plain: !!options.plain,
-            })
+            isTTY: !!process.stdout.isTTY,
+            plain: !!options.plain,
+          })
           : options.compact
             ? "No matches found."
             : "";
