@@ -2,17 +2,7 @@ import * as path from "node:path";
 import { highlight } from "cli-highlight";
 import { getLanguageByExtension } from "../store/languages";
 import type { ChunkType, FileMetadata } from "../store/types";
-
-const useColors = process.stdout.isTTY && !process.env.NO_COLOR;
-
-const style = {
-  bold: (s: string) => (useColors ? `\x1b[1m${s}\x1b[22m` : s),
-  dim: (s: string) => (useColors ? `\x1b[2m${s}\x1b[22m` : s),
-  green: (s: string) => (useColors ? `\x1b[32m${s}\x1b[39m` : s),
-  blue: (s: string) => (useColors ? `\x1b[34m${s}\x1b[39m` : s),
-  cyan: (s: string) => (useColors ? `\x1b[36m${s}\x1b[39m` : s),
-  gray: (s: string) => (useColors ? `\x1b[90m${s}\x1b[39m` : s),
-};
+import { style } from "../utils/ansi";
 
 function detectLanguage(filePath: string): string {
   const ext = path.extname(filePath);
@@ -115,21 +105,5 @@ export function formatResults(
 ): string {
   if (results.length === 0) return "No results found.";
   return results.map((r) => formatResult(r, root, options)).join("\n\n");
-}
-
-
-export interface JsonOutput {
-  results?: ChunkType[];
-  hits?: unknown[];
-  tsv?: string;
-  format?: string;
-  metadata?: {
-    count: number;
-    query?: string;
-  };
-}
-
-export function formatJson(data: JsonOutput): string {
-  return JSON.stringify(data, null, 2);
 }
 
