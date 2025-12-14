@@ -3,6 +3,9 @@ use ort::value::Value;
 use tokenizers::Tokenizer;
 use hf_hub::{api::sync::Api, Repo, RepoType};
 
+#[cfg(target_os = "macos")]
+use ort::execution_providers::CoreMLExecutionProvider;
+
 fn log_native(msg: impl AsRef<str>) {
     // Intentionally no-op: native logging was polluting CLI output.
     // If you need debugging, add structured logging at the JS layer instead.
@@ -33,10 +36,23 @@ impl DenseEncoderOrt {
 
         log_native(format!("[ORT] Loading model from {:?}", model_path));
 
-        // Initialize ONNX Runtime session with CPU provider
+        // Initialize ONNX Runtime session
+        // On macOS, use CoreML for GPU acceleration with CPU fallback
+        #[cfg(target_os = "macos")]
+        let session = Session::builder()?
+            .with_execution_providers([
+                CoreMLExecutionProvider::default()
+                    .with_subgraphs(true)  // Enable CoreML for subgraphs
+                    .build(),
+            ])?
+            .with_optimization_level(GraphOptimizationLevel::Level3)?
+            .with_intra_threads(4)?
+            .commit_from_file(&model_path)?;
+
+        #[cfg(not(target_os = "macos"))]
         let session = Session::builder()?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(4)?  // Use 4 threads for intra-op parallelism
+            .with_intra_threads(4)?
             .commit_from_file(&model_path)?;
 
         // Load tokenizer
@@ -69,7 +85,20 @@ impl DenseEncoderOrt {
     pub fn load(model_path: &str, tokenizer_path: &str, hidden_size: usize) -> anyhow::Result<Self> {
         log_native(format!("[ORT] Loading model from {}", model_path));
 
-        // Initialize ONNX Runtime session with CPU provider
+        // Initialize ONNX Runtime session
+        // On macOS, use CoreML for GPU acceleration with CPU fallback
+        #[cfg(target_os = "macos")]
+        let session = Session::builder()?
+            .with_execution_providers([
+                CoreMLExecutionProvider::default()
+                    .with_subgraphs(true)
+                    .build(),
+            ])?
+            .with_optimization_level(GraphOptimizationLevel::Level3)?
+            .with_intra_threads(4)?
+            .commit_from_file(model_path)?;
+
+        #[cfg(not(target_os = "macos"))]
         let session = Session::builder()?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
             .with_intra_threads(4)?

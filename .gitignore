@@ -44,6 +44,7 @@ pnpm-lock.yaml
 package-lock.json
 yarn.lock
 
+bun.lockb
 # Native core (Rust / N-API) build outputs
 osgrep-core/target/
 **/target/
