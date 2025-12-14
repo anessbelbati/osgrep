@@ -1,6 +1,6 @@
 import * as path from "node:path";
 import { highlight } from "cli-highlight";
-import { getLanguageByExtension } from "../core/languages";
+import { getLanguageByExtension } from "../store/languages";
 import type { ChunkType, FileMetadata } from "../store/types";
 
 const useColors = process.stdout.isTTY && !process.env.NO_COLOR;
@@ -116,3 +116,20 @@ export function formatResults(
   if (results.length === 0) return "No results found.";
   return results.map((r) => formatResult(r, root, options)).join("\n\n");
 }
+
+
+export interface JsonOutput {
+  results?: ChunkType[];
+  hits?: unknown[];
+  tsv?: string;
+  format?: string;
+  metadata?: {
+    count: number;
+    query?: string;
+  };
+}
+
+export function formatJson(data: JsonOutput): string {
+  return JSON.stringify(data, null, 2);
+}
+

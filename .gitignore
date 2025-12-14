@@ -49,3 +49,4 @@ osgrep-core/target/
 **/target/
 osgrep-core/*.node
 osgrep-core/bench/
+.osgrep

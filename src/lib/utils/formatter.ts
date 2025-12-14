@@ -17,7 +17,7 @@ const style = {
   blue: (s: string) => `\x1b[34m${s}\x1b[39m`,
 };
 
-import { getLanguageByExtension } from "../core/languages";
+import { getLanguageByExtension } from "../store/languages";
 
 function detectLanguage(filePath: string): string {
   const ext = path.extname(filePath);

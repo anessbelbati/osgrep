@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { CONFIG } from "../../config";
-import { getLanguageByExtension } from "../core/languages";
+import { getLanguageByExtension } from "../store/languages";
 import { GRAMMARS_DIR } from "./grammar-loader";
 
 // web-tree-sitter ships a CommonJS build
