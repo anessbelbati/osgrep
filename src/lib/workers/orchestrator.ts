@@ -268,6 +268,9 @@ export class WorkerOrchestrator {
         colbert = col;
       } else if (Buffer.isBuffer(col)) {
         colbert = new Int8Array(col.buffer, col.byteOffset, col.byteLength);
+      } else if (ArrayBuffer.isView(col)) {
+        // Handles Uint8Array and other typed arrays (e.g. from LanceDB)
+        colbert = new Int8Array(col.buffer, col.byteOffset, col.byteLength);
       } else if (Array.isArray(col)) {
         colbert = new Int8Array(col);
       } else {

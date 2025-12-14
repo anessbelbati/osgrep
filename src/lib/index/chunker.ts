@@ -119,7 +119,7 @@ export function formatChunkText(
   const sections: string[] = [];
 
   // 1. File path (always first)
-  sections.push(`// ${filePath}`);
+  sections.push(`// File: ${filePath}`);
 
   // 2. Imports (if available)
   if (chunk.imports && chunk.imports.length > 0) {

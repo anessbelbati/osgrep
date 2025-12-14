@@ -45,10 +45,11 @@ export async function initNative(): Promise<void> {
     }
 
     initialized = true;
-  })();
+  })().finally(() => {
+    initPromise = null;
+  });
 
-  await initPromise;
-  initPromise = null;
+  return initPromise;
 }
 
 /**
