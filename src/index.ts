@@ -13,9 +13,7 @@ import { installOpencode, uninstallOpencode } from "./commands/opencode";
 import { search } from "./commands/search";
 import { serve } from "./commands/serve";
 import { setup } from "./commands/setup";
-import { skeleton } from "./commands/skeleton";
 import { symbols } from "./commands/symbols";
-import { trace } from "./commands/trace";
 
 program
   .version(
@@ -48,9 +46,7 @@ if (isIndexCommand && fs.existsSync(legacyDataPath)) {
 program.addCommand(search, { isDefault: true });
 program.addCommand(index);
 program.addCommand(list);
-program.addCommand(skeleton);
 program.addCommand(symbols);
-program.addCommand(trace);
 program.addCommand(setup);
 program.addCommand(serve);
 program.addCommand(mcp);

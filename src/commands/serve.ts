@@ -175,7 +175,6 @@ export const serve = new Command("serve")
                   { rerank: true },
                   undefined,
                   searchPath,
-                  undefined, // intent
                   ac.signal,
                 );
 

@@ -1,7 +1,6 @@
 import * as fs from "node:fs";
 import ora from "ora";
 import { PATHS } from "../../config";
-import { areModelsDownloaded, downloadModels } from "./model-loader";
 
 export interface SetupPaths {
   root: string;
@@ -11,7 +10,6 @@ export interface SetupPaths {
 
 export interface SetupStatus extends SetupPaths {
   createdDirs: boolean;
-  downloadedModels: boolean;
 }
 
 function getPaths(): SetupPaths {
@@ -56,22 +54,5 @@ export async function ensureSetup({
     throw error;
   }
 
-  const modelsPresent = areModelsDownloaded();
-  let downloadedModels = false;
-
-  if (!modelsPresent) {
-    const modelSpinner = !silent
-      ? ora("Downloading models (first run)...").start()
-      : null;
-    try {
-      await downloadModels();
-      downloadedModels = true;
-      modelSpinner?.succeed("Models downloaded and ready");
-    } catch (error) {
-      modelSpinner?.fail("Failed to download models");
-      throw error;
-    }
-  }
-
-  return { ...paths, createdDirs, downloadedModels };
+  return { ...paths, createdDirs };
 }

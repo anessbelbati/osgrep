@@ -2,7 +2,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Command } from "commander";
-import { MODEL_IDS, PATHS } from "../config";
+import { PATHS } from "../config";
+import { initNative } from "../lib/native";
 import { gracefulExit } from "../lib/utils/exit";
 import { findProjectRoot } from "../lib/utils/project-root";
 
@@ -12,9 +13,7 @@ export const doctor = new Command("doctor")
     console.log("🏥 osgrep Doctor\n");
 
     const root = PATHS.globalRoot;
-    const models = PATHS.models;
     const grammars = PATHS.grammars;
-    const modelIds = [MODEL_IDS.embed, MODEL_IDS.colbert];
 
     const checkDir = (name: string, p: string) => {
       const exists = fs.existsSync(p);
@@ -23,24 +22,15 @@ export const doctor = new Command("doctor")
     };
 
     checkDir("Root", root);
-    checkDir("Models", models);
     checkDir("Grammars", grammars);
 
-    const modelStatuses = modelIds.map((id) => {
-      const modelPath = path.join(models, ...id.split("/"));
-      return { id, path: modelPath, exists: fs.existsSync(modelPath) };
-    });
-
-    modelStatuses.forEach(({ id, path: p, exists }) => {
-      const symbol = exists ? "✅" : "❌";
-      console.log(`${symbol} Model: ${id} (${p})`);
-    });
-
-    const missingModels = modelStatuses.filter(({ exists }) => !exists);
-    if (missingModels.length > 0) {
-      console.log(
-        "❌ Some models are missing; osgrep will try bundled copies first, then download.",
-      );
+    try {
+      await initNative();
+      console.log("✅ Native models initialized");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.log(`❌ Native init failed: ${msg}`);
+      console.log("   Try: osgrep setup");
     }
 
     console.log(`\nLocal Project: ${process.cwd()}`);

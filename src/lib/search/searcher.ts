@@ -8,11 +8,16 @@ import type {
 } from "../store/types";
 import type { VectorDB } from "../store/vector-db";
 import { escapeSqlString, normalizePath } from "../utils/filter-builder";
-import { getWorkerPool } from "../workers/pool";
-import { detectIntent, type SearchIntent } from "./intent";
+import { encodeQuery, rerank } from "../workers/orchestrator";
 
 export class Searcher {
   constructor(private db: VectorDB) {}
+
+  private static readonly PRE_RERANK_K_MULT = 5;
+  private static readonly PRE_RERANK_K_MIN = 500;
+  private static readonly RERANK_CANDIDATES_K = 80;
+  private static readonly FUSED_WEIGHT = 0.5;
+  private static readonly MAX_PER_FILE = 3;
 
   private mapRecordToChunk(
     record: Partial<VectorRecord>,
@@ -135,72 +140,12 @@ export class Searcher {
   private applyStructureBoost(
     record: Partial<VectorRecord>,
     score: number,
-    intent?: SearchIntent,
   ): number {
     let adjusted = score;
 
-    // Item 6: Anchors are recall helpers, not rank contenders
+    // Anchor penalty (anchors are recall helpers, not results)
     if (record.is_anchor) {
-      // Minimal penalty to break ties
-      const anchorPenalty =
-        Number.parseFloat(process.env.OSGREP_ANCHOR_PENALTY ?? "") || 0.99;
-      adjusted *= anchorPenalty;
-    } else {
-      // Only boost non-anchors
-      const chunkType = record.chunk_type || "";
-      const boosted = [
-        "function",
-        "class",
-        "method",
-        "interface",
-        "type_alias",
-      ];
-      if (boosted.includes(chunkType)) {
-        let boostFactor = 1.0;
-
-        // Base boost
-        boostFactor *= 1.1;
-
-        // --- Role Boost ---
-        if (record.role === "ORCHESTRATION") {
-          boostFactor *= 1.5;
-        } else if (record.role === "DEFINITION") {
-          boostFactor *= 1.2;
-        } else if (record.role === "IMPLEMENTATION") {
-          boostFactor *= 1.1;
-        }
-
-        // --- Complexity/Orchestration Boost (User Requested) ---
-        const refs = record.referenced_symbols?.length || 0;
-
-        if (refs > 5) {
-          // Small boost for non-trivial functions
-          boostFactor *= 1.1;
-        }
-        if (refs > 15) {
-          // Massive boost for Orchestrators
-          boostFactor *= 1.25;
-        }
-
-        // Intent-based boosts
-        if (intent) {
-          if (intent.type === "DEFINITION" && record.role === "DEFINITION") {
-            boostFactor *= 1.2;
-          }
-          if (intent.type === "FLOW" && record.role === "ORCHESTRATION") {
-            boostFactor *= 1.4;
-          }
-          if (intent.type === "USAGE" && record.role === "IMPLEMENTATION") {
-            boostFactor *= 1.2;
-          }
-        }
-
-        adjusted *= boostFactor;
-      }
-    }
-
-    if (record.role === "DOCS") {
-      adjusted *= 0.6;
+      adjusted *= 0.99;
     }
 
     const pathStr = (record.path || "").toLowerCase();
@@ -211,25 +156,15 @@ export class Searcher {
       /\.(test|spec)\.[cm]?[jt]sx?$/i.test(pathStr);
 
     if (isTestPath) {
-      const testPenalty =
-        Number.parseFloat(process.env.OSGREP_TEST_PENALTY ?? "") || 0.5;
-      adjusted *= testPenalty;
+      adjusted *= 0.5;
     }
     if (
       pathStr.endsWith(".md") ||
-      pathStr.endsWith(".mdx") ||
-      pathStr.endsWith(".txt") ||
       pathStr.endsWith(".json") ||
       pathStr.endsWith(".lock") ||
       pathStr.includes("/docs/")
     ) {
-      const docPenalty =
-        Number.parseFloat(process.env.OSGREP_DOC_PENALTY ?? "") || 0.6;
-      adjusted *= docPenalty; // Downweight docs/data
-    }
-    // Import-only penalty
-    if ((record.content || "").length < 50 && !record.is_exported) {
-      adjusted *= 0.9;
+      adjusted *= 0.6;
     }
 
     return adjusted;
@@ -283,17 +218,13 @@ export class Searcher {
   async search(
     query: string,
     top_k?: number,
-    _search_options?: { rerank?: boolean },
-    _filters?: SearchFilter,
+    options?: { rerank?: boolean },
+    filters?: SearchFilter,
     pathPrefix?: string,
-    intent?: SearchIntent,
     signal?: AbortSignal,
   ): Promise<SearchResponse> {
     const finalLimit = top_k ?? 10;
-    const doRerank = _search_options?.rerank ?? true;
-    const searchIntent = intent || detectIntent(query);
-
-    const pool = getWorkerPool();
+    const doRerank = options?.rerank ?? true;
 
     if (signal?.aborted) {
       const err = new Error("Aborted");
@@ -305,8 +236,7 @@ export class Searcher {
       dense: queryVector,
       colbert: queryMatrixRaw,
       colbertDim,
-      pooled_colbert_48d: queryPooled,
-    } = await pool.encodeQuery(query, signal);
+    } = await encodeQuery(query);
 
     if (signal?.aborted) {
       const err = new Error("Aborted");
@@ -328,43 +258,28 @@ export class Searcher {
     }
 
     // Handle --def (definition) filter
-    const defFilter = _filters?.def;
+    const defFilter = filters?.def;
     if (typeof defFilter === "string" && defFilter) {
       whereClauseParts.push(
         `array_contains(defined_symbols, '${escapeSqlString(defFilter)}')`,
       );
-    } else if (
-      searchIntent.type === "DEFINITION" &&
-      searchIntent.filters?.definitionsOnly
-    ) {
-      // If intent is DEFINITION but no specific symbol provided, filter by role
-      whereClauseParts.push(
-        `(role = 'DEFINITION' OR array_length(defined_symbols) > 0)`,
-      );
     }
 
     // Handle --ref (reference) filter
-    const refFilter = _filters?.ref;
+    const refFilter = filters?.ref;
     if (typeof refFilter === "string" && refFilter) {
       whereClauseParts.push(
         `array_contains(referenced_symbols, '${escapeSqlString(refFilter)}')`,
       );
-    } else if (
-      searchIntent.type === "USAGE" &&
-      searchIntent.filters?.usagesOnly
-    ) {
-      // If intent is USAGE, we might want to filter out definitions?
-      // For now, let's just rely on boosting.
     }
 
     const whereClause =
       whereClauseParts.length > 0 ? whereClauseParts.join(" AND ") : undefined;
 
-    const envPreK = Number.parseInt(process.env.OSGREP_PRE_K ?? "", 10);
-    const PRE_RERANK_K =
-      Number.isFinite(envPreK) && envPreK > 0
-        ? envPreK
-        : Math.max(finalLimit * 5, 500);
+    const PRE_RERANK_K = Math.max(
+      finalLimit * Searcher.PRE_RERANK_K_MULT,
+      Searcher.PRE_RERANK_K_MIN,
+    );
     let table: Table;
     try {
       table = await this.db.ensureTable();
@@ -430,61 +345,14 @@ export class Searcher {
       .map(([key]) => docMap.get(key))
       .filter(Boolean) as VectorRecord[];
 
-    // Item 8: Widen PRE_RERANK_K
-    // Retrieve a wide set for Stage 1 filtering
-    const envStage1 = Number.parseInt(process.env.OSGREP_STAGE1_K ?? "", 10);
-    const STAGE1_K =
-      Number.isFinite(envStage1) && envStage1 > 0 ? envStage1 : 200;
-    const topCandidates = fused.slice(0, STAGE1_K);
-
-    // Item 9: Two-stage rerank
-    // Stage 1: Cheap pooled cosine filter
-    let stage2Candidates = topCandidates;
-    const envStage2K = Number.parseInt(process.env.OSGREP_STAGE2_K ?? "", 10);
-    const STAGE2_K =
-      Number.isFinite(envStage2K) && envStage2K > 0 ? envStage2K : 40;
-
-    const envRerankTop = Number.parseInt(
-      process.env.OSGREP_RERANK_TOP ?? "",
-      10,
-    );
-    const RERANK_TOP =
-      Number.isFinite(envRerankTop) && envRerankTop > 0 ? envRerankTop : 20;
-    const envBlend = Number.parseFloat(process.env.OSGREP_RERANK_BLEND ?? "");
-    const FUSED_WEIGHT =
-      Number.isFinite(envBlend) && envBlend >= 0 ? envBlend : 0.5;
-
-    if (queryPooled && topCandidates.length > STAGE2_K) {
-      const cosineScores = topCandidates.map((doc) => {
-        if (!doc.pooled_colbert_48d) return -1;
-        // Manual cosine sim since we don't have helper here easily
-        // Assuming vectors are normalized (which they should be from orchestrator)
-        let dot = 0;
-        const docVec = doc.pooled_colbert_48d;
-        for (let i = 0; i < queryPooled.length; i++) {
-          dot += queryPooled[i] * (docVec[i] || 0);
-        }
-        return dot;
-      });
-
-      // Sort by cosine score and keep top N
-      const withScore = topCandidates.map((doc, i) => ({
-        doc,
-        score: cosineScores[i],
-      }));
-      withScore.sort((a, b) => b.score - a.score);
-      stage2Candidates = withScore.slice(0, STAGE2_K).map((x) => x.doc);
-    }
-
-    if (stage2Candidates.length === 0) {
+    if (fused.length === 0) {
       return { data: [] };
     }
 
-    const rerankCandidates = stage2Candidates.slice(0, RERANK_TOP);
+    const rerankCandidates = fused.slice(0, Searcher.RERANK_CANDIDATES_K);
 
     const scores = doRerank
-      ? await pool.rerank(
-          {
+      ? await rerank({
             query: queryMatrixRaw,
             docs: rerankCandidates.map((doc) => ({
               colbert: (doc.colbert as Buffer | Int8Array | number[]) ?? [],
@@ -495,9 +363,7 @@ export class Searcher {
                 : undefined,
             })),
             colbertDim,
-          },
-          signal,
-        )
+          })
       : rerankCandidates.map((doc, idx) => {
           // If rerank is disabled, fall back to fusion ordering with structural boost
           const key = doc.id || `${doc.path}:${doc.chunk_index}`;
@@ -515,8 +381,8 @@ export class Searcher {
       const base = scores?.[idx] ?? 0;
       const key = doc.id || `${doc.path}:${doc.chunk_index}`;
       const fusedScore = candidateScores.get(key) ?? 0;
-      const blended = base + FUSED_WEIGHT * fusedScore;
-      const boosted = this.applyStructureBoost(doc, blended, searchIntent);
+      const blended = base + Searcher.FUSED_WEIGHT * fusedScore;
+      const boosted = this.applyStructureBoost(doc, blended);
       return { record: doc, score: boosted };
     });
 
@@ -529,17 +395,11 @@ export class Searcher {
     // Item 10: Per-file diversification
     const seenFiles = new Map<string, number>();
     const diversified: ScoredItem[] = [];
-    const envMaxPerFile = Number.parseInt(
-      process.env.OSGREP_MAX_PER_FILE ?? "",
-      10,
-    );
-    const MAX_PER_FILE =
-      Number.isFinite(envMaxPerFile) && envMaxPerFile > 0 ? envMaxPerFile : 3;
 
     for (const item of uniqueScored) {
       const path = item.record.path || "";
       const count = seenFiles.get(path) || 0;
-      if (count < MAX_PER_FILE) {
+      if (count < Searcher.MAX_PER_FILE) {
         diversified.push(item);
         seenFiles.set(path, count + 1);
       }
