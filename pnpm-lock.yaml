@@ -45,8 +45,8 @@ dependencies:
     specifier: ^5.4.1
     version: 5.4.1
   osgrep-core:
-    specifier: file:../osgrep_v2
-    version: file:../osgrep_v2
+    specifier: file:./osgrep-core
+    version: file:osgrep-core
   simsimd:
     specifier: ^6.5.5
     version: 6.5.5
@@ -3429,7 +3429,7 @@ packages:
   /zod@4.1.13:
     resolution: {integrity: sha512-AvvthqfqrAhNH9dnfmrfKzX5upOdjUVJYFqNSlkmGf64gRaTzlPwz99IHYnVs28qYAybvAlBV+H7pn0saFY4Ig==}
 
-  file:../osgrep_v2:
-    resolution: {directory: ../osgrep_v2, type: directory}
+  file:osgrep-core:
+    resolution: {directory: osgrep-core, type: directory}
     name: osgrep-core
     dev: false

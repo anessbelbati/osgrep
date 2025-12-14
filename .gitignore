@@ -1,5 +1,6 @@
 dist/
 node_modules/
+**/node_modules/
 *.tsbuildinfo
 *.tgz
 ADVANCED.md
@@ -26,3 +27,11 @@ benchmarks/*.log
 .osgrep
 TODO.md
 AGENTS.md
+
+# Native core (Rust / N-API) build outputs
+osgrep-core/target/
+**/target/
+osgrep-core/*.node
+
+# Optional benchmark dependency (was a nested git repo)
+osgrep-core/bench/opencode/

@@ -47,7 +47,7 @@
   "license": "Apache-2.0",
   "description": "Local grep-like search tool for your codebase.",
   "dependencies": {
-    "osgrep-core": "file:../osgrep_v2",
+    "osgrep-core": "file:./osgrep-core",
     "@clack/prompts": "^0.11.0",
     "@lancedb/lancedb": "^0.22.3",
     "@modelcontextprotocol/sdk": "^1.24.3",

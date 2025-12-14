@@ -23,7 +23,7 @@ async function loadNative() {
     native = await import("osgrep-core");
   } catch (e) {
     throw new Error(
-      `Failed to load osgrep-core native binding. Run 'npm run build:release' in osgrep_v2/: ${e}`
+      `Failed to load osgrep-core native binding. Run 'npm run build:release' in osgrep/osgrep-core/: ${e}`
     );
   }
 
