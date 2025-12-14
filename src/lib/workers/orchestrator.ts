@@ -9,8 +9,8 @@
  * No worker pool needed - Rust ONNX Runtime is fast and stable.
  */
 
+import * as crypto from "node:crypto";
 import * as path from "node:path";
-import { v4 as uuidv4 } from "uuid";
 import { CONFIG } from "../../config";
 import {
   buildAnchorChunk,
@@ -124,7 +124,7 @@ export class WorkerOrchestrator {
       const next = texts[i + 1]?.displayText;
 
       prepared.push({
-        id: uuidv4(),
+        id: crypto.randomUUID(),
         path: filePath,
         hash,
         content,

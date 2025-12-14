@@ -46,16 +46,13 @@ Read src/auth/handler.ts:45-120
 
 Read the specific line range, not the whole file.
 
-## Other commands
+## Other options
 ```bash
-# Trace call graph (who calls X, what X calls)
-osgrep trace handleAuth
-
-# Skeleton of a huge file (to find which ranges to read)
-osgrep skeleton src/giant-2000-line-file.ts
-
 # Just file paths when you only need locations
 osgrep "authentication" --compact
+
+# Show more results
+osgrep "error handling" -m 20
 ```
 
 ## Workflow: architecture questions
@@ -66,9 +63,6 @@ osgrep "where do requests enter the server"
 
 # 2. If you need deeper context on a specific function
 Read src/server/handler.ts:45-120
-
-# 3. Trace to understand call flow
-osgrep trace handleRequest
 ```
 
 ## Tips
