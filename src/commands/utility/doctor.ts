@@ -2,10 +2,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Command } from "commander";
-import { PATHS } from "../config";
-import { initNative } from "../lib/native";
-import { gracefulExit } from "../lib/utils/exit";
-import { findProjectRoot } from "../lib/utils/project-root";
+import { PATHS } from "../../config";
+import { initNative } from "../../lib/native";
+import { gracefulExit } from "../../lib/utils/exit";
+import { findProjectRoot } from "../../lib/utils/project-root";
 
 export const doctor = new Command("doctor")
   .description("Check osgrep health and paths")

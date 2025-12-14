@@ -7,9 +7,9 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { Command } from "commander";
-import { initialSync } from "../lib/index/syncer";
-import { ensureSetup } from "../lib/setup/setup-helpers";
-import { ensureProjectPaths, findProjectRoot } from "../lib/utils/project-root";
+import { initialSync } from "../../lib/index/syncer";
+import { ensureSetup } from "../../lib/setup/setup-helpers";
+import { ensureProjectPaths, findProjectRoot } from "../../lib/utils/project-root";
 
 export const mcp = new Command("mcp")
   .description("Start MCP server for osgrep")
