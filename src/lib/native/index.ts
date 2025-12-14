@@ -28,11 +28,17 @@ export async function initNative(): Promise<void> {
   if (initialized) return;
   if (initPromise) return initPromise;
 
+  const DEBUG_TIMING = process.env.DEBUG_SEARCH_TIMING === "1";
+
   initPromise = (async () => {
+    if (DEBUG_TIMING) console.time("[native] loadNative");
     const n = await loadNative();
+    if (DEBUG_TIMING) console.timeEnd("[native] loadNative");
 
     if (!n.isInitialized()) {
+      if (DEBUG_TIMING) console.time("[native] initModels");
       n.initModels(MODEL_IDS.embed, MODEL_IDS.colbert);
+      if (DEBUG_TIMING) console.timeEnd("[native] initModels");
     }
 
     initialized = true;
@@ -129,10 +135,13 @@ export interface HybridEmbedding {
  * Returns per-text embeddings ready for storage
  */
 export async function embedBatch(texts: string[]): Promise<HybridEmbedding[]> {
+  const DEBUG_TIMING = process.env.DEBUG_SEARCH_TIMING === "1";
   await initNative();
   const n = await loadNative();
 
+  if (DEBUG_TIMING) console.time(`[native] embedBatch (${texts.length} texts)`);
   const result = n.embedBatch(texts);
+  if (DEBUG_TIMING) console.timeEnd(`[native] embedBatch (${texts.length} texts)`);
   const dim = CONFIG.VECTOR_DIM;
   const colbertDim = CONFIG.COLBERT_DIM;
 
@@ -182,10 +191,13 @@ export async function embedBatch(texts: string[]): Promise<HybridEmbedding[]> {
  * Returns query embedding matrix as Float32Array
  */
 export async function encodeQueryColbert(query: string): Promise<Float32Array> {
+  const DEBUG_TIMING = process.env.DEBUG_SEARCH_TIMING === "1";
   await initNative();
   const n = await loadNative();
 
+  if (DEBUG_TIMING) console.time("[native] encodeQueryColbert");
   const result = n.encodeQueryColbert(query);
+  if (DEBUG_TIMING) console.timeEnd("[native] encodeQueryColbert");
   return new Float32Array(result);
 }
 
@@ -221,6 +233,7 @@ export interface RerankResult {
  * Rerank documents using pre-indexed ColBERT embeddings
  */
 export async function rerankColbert(input: RerankInput): Promise<RerankResult> {
+  const DEBUG_TIMING = process.env.DEBUG_SEARCH_TIMING === "1";
   await initNative();
   const n = await loadNative();
 
@@ -236,6 +249,7 @@ export async function rerankColbert(input: RerankInput): Promise<RerankResult> {
       ? input.docTokenIds
       : Uint32Array.from(input.docTokenIds as any);
 
+  if (DEBUG_TIMING) console.time(`[native] rerankColbert (${input.candidateIndices.length} docs)`);
   const result = n.rerankColbert(
     q,
     docs,
@@ -245,6 +259,7 @@ export async function rerankColbert(input: RerankInput): Promise<RerankResult> {
     input.candidateIndices,
     input.topK
   );
+  if (DEBUG_TIMING) console.timeEnd(`[native] rerankColbert (${input.candidateIndices.length} docs)`);
 
   return {
     indices: Array.from(result.indices),

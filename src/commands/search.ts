@@ -19,7 +19,7 @@ import { gracefulExit } from "../lib/utils/exit";
 import { formatTextResults, type TextResult } from "../lib/utils/formatter";
 import { isLocked } from "../lib/utils/lock";
 import { ensureProjectPaths, findProjectRoot } from "../lib/utils/project-root";
-import { getServerForProject } from "../lib/utils/server-registry";
+import { getServerForProject, unregisterServer } from "../lib/utils/server-registry";
 
 function toTextResults(data: SearchResponse["data"]): TextResult[] {
   return data.map((r) => {
@@ -327,78 +327,151 @@ export const search: Command = new CommanderCommand("search")
       findProjectRoot(execPathForServer) ?? execPathForServer;
     const server = getServerForProject(projectRootForServer);
 
-    if (server) {
+    if (process.env.DEBUG_SERVER) {
+      console.error(`[search] projectRootForServer: ${projectRootForServer}`);
+      console.error(`[search] server found: ${JSON.stringify(server)}`);
+    }
+
+    if (server && Number.isFinite(server.port) && server.port > 0) {
+      if (process.env.DEBUG_SERVER) {
+        console.error(`[search] attempting fetch to server on port ${server.port}`);
+      }
       try {
-        const response = await fetch(`http://localhost:${server.port}/search`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            query: pattern,
-            limit,
-            path: exec_path
-              ? path.relative(projectRootForServer, path.resolve(exec_path))
-              : undefined,
-          }),
-        });
+        // Fast preflight so a hung server doesn't add multi-second latency.
+        const healthTimeoutMsRaw = Number.parseInt(
+          process.env.OSGREP_SERVER_HEALTH_TIMEOUT_MS || "",
+          10,
+        );
+        const healthTimeoutMs =
+          Number.isFinite(healthTimeoutMsRaw) && healthTimeoutMsRaw > 0
+            ? healthTimeoutMsRaw
+            : process.stdout.isTTY
+              ? 250
+              : 150;
+        {
+          const ac = new AbortController();
+          let timeout: NodeJS.Timeout | undefined;
+          try {
+            timeout = setTimeout(() => ac.abort(), healthTimeoutMs);
+            const health = await fetch(
+              `http://localhost:${server.port}/health`,
+              { signal: ac.signal },
+            );
+            if (!health.ok) throw new Error(`health_${health.status}`);
+          } finally {
+            if (timeout) clearTimeout(timeout);
+          }
+        }
 
-        if (response.ok) {
-          const body = (await response.json()) as { results: any[] };
+        const timeoutMsRaw = Number.parseInt(
+          process.env.OSGREP_SERVER_TIMEOUT_MS || "",
+          10,
+        );
+        const timeoutMs =
+          Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0
+            ? timeoutMsRaw
+            : process.stdout.isTTY
+              ? 1200
+              : 700;
+        const ac = new AbortController();
+        let timeout: NodeJS.Timeout | undefined;
+        try {
+          timeout = setTimeout(() => ac.abort(), timeoutMs);
 
-          const searchResult = { data: body.results };
-          const filteredData = searchResult.data.filter(
-            (r) => typeof r.score !== "number" || r.score >= minScore,
+          const response = await fetch(
+            `http://localhost:${server.port}/search`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                query: pattern,
+                limit,
+                path: exec_path
+                  ? path.relative(projectRootForServer, path.resolve(exec_path))
+                  : undefined,
+              }),
+              signal: ac.signal,
+            },
           );
 
-          const compactHits = options.compact
-            ? toCompactHits(filteredData)
-            : [];
-
-          if (options.compact) {
-            const compactText = compactHits.length
-              ? formatCompactTable(compactHits, projectRootForServer, pattern, {
-                isTTY: !!process.stdout.isTTY,
-                plain: !!options.plain,
-              })
-              : "No matches found.";
-            console.log(compactText);
-            return; // EXIT
+          if (process.env.DEBUG_SERVER) {
+            console.error(`[search] server response status: ${response.status}`);
           }
+          if (response.ok) {
+            if (process.env.DEBUG_SERVER) {
+              console.error("[search] server returned OK, using server results");
+            }
+            const body = (await response.json()) as { results: any[] };
 
-          if (!filteredData.length) {
-            console.log("No matches found.");
-            return; // EXIT
-          }
-
-          const isTTY = process.stdout.isTTY;
-          const shouldBePlain = options.plain || !isTTY;
-
-          if (shouldBePlain) {
-            const mappedResults = toTextResults(filteredData);
-            const output = formatTextResults(
-              mappedResults,
-              pattern,
-              projectRootForServer,
-              {
-                isPlain: true,
-                compact: options.compact,
-                content: options.content,
-                perFile: parseInt(options.perFile, 10),
-                showScores: options.scores,
-              },
+            const searchResult = { data: body.results };
+            const filteredData = searchResult.data.filter(
+              (r) => typeof r.score !== "number" || r.score >= minScore,
             );
-            console.log(output);
-          } else {
-            const { formatResults } = await import("../lib/output/formatter");
-            const output = formatResults(filteredData, projectRootForServer, {
-              content: options.content,
-            });
-            console.log(output);
-          }
 
-          return; // EXIT successful server search
+            const compactHits = options.compact
+              ? toCompactHits(filteredData)
+              : [];
+
+            if (options.compact) {
+              const compactText = compactHits.length
+                ? formatCompactTable(
+                  compactHits,
+                  projectRootForServer,
+                  pattern,
+                  {
+                    isTTY: !!process.stdout.isTTY,
+                    plain: !!options.plain,
+                  },
+                )
+                : "No matches found.";
+              console.log(compactText);
+              return; // EXIT
+            }
+
+            if (!filteredData.length) {
+              console.log("No matches found.");
+              return; // EXIT
+            }
+
+            const isTTY = process.stdout.isTTY;
+            const shouldBePlain = options.plain || !isTTY;
+
+            if (shouldBePlain) {
+              const mappedResults = toTextResults(filteredData);
+              const output = formatTextResults(
+                mappedResults,
+                pattern,
+                projectRootForServer,
+                {
+                  isPlain: true,
+                  compact: options.compact,
+                  content: options.content,
+                  perFile: parseInt(options.perFile, 10),
+                  showScores: options.scores,
+                },
+              );
+              console.log(output);
+            } else {
+              const { formatResults } = await import("../lib/output/formatter");
+              const output = formatResults(filteredData, projectRootForServer, {
+                content: options.content,
+              });
+              console.log(output);
+            }
+
+            return; // EXIT successful server search
+          }
+        } finally {
+          if (timeout) clearTimeout(timeout);
         }
       } catch (e) {
-        if (process.env.DEBUG) {
+        // If the server isn't reachable, remove the stale registry entry so we
+        // don't pay this timeout cost on every query.
+        const msg = e instanceof Error ? e.message : String(e);
+        if (msg.includes("ECONNREFUSED") || msg.includes("health_")) {
+          unregisterServer(server.pid);
+        }
+        if (process.env.DEBUG || process.env.DEBUG_SERVER) {
           console.error(
             "[search] server request failed, falling back to local:",
             e,
@@ -407,8 +480,20 @@ export const search: Command = new CommanderCommand("search")
       }
     }
 
+    if (process.env.DEBUG_SERVER) {
+      console.error("[search] falling through to local search");
+    }
+
     try {
+      const DEBUG_TIMING = process.env.DEBUG_SEARCH_TIMING === "1";
+      const t = (label: string) => DEBUG_TIMING && console.time(`[cmd] ${label}`);
+      const te = (label: string) => DEBUG_TIMING && console.timeEnd(`[cmd] ${label}`);
+
+      t("total-cmd");
+      t("ensureSetup");
       await ensureSetup();
+      te("ensureSetup");
+
       const searchRoot = exec_path ? path.resolve(exec_path) : root;
       const projectRoot = findProjectRoot(searchRoot) ?? searchRoot;
       const paths = ensureProjectPaths(projectRoot);
@@ -416,7 +501,9 @@ export const search: Command = new CommanderCommand("search")
       // Propagate project root to worker processes
       process.env.OSGREP_PROJECT_ROOT = projectRoot;
 
+      t("VectorDB-init");
       vectorDb = new VectorDB(paths.lancedbDir);
+      te("VectorDB-init");
 
       // Check for active indexing lock and warn if present
       // This allows agents (via shim) to know results might be partial.
@@ -426,7 +513,9 @@ export const search: Command = new CommanderCommand("search")
         );
       }
 
+      t("hasAnyRows");
       const hasRows = await vectorDb.hasAnyRows();
+      te("hasAnyRows");
       const needsSync = options.sync || !hasRows;
 
       if (needsSync) {
@@ -489,6 +578,7 @@ export const search: Command = new CommanderCommand("search")
 
       const searcher = new Searcher(vectorDb);
 
+      t("searcher.search");
       const searchResult = await searcher.search(
         pattern,
         limit,
@@ -496,6 +586,8 @@ export const search: Command = new CommanderCommand("search")
         undefined,
         exec_path ? path.relative(projectRoot, path.resolve(exec_path)) : "",
       );
+      te("searcher.search");
+      te("total-cmd");
 
       const filteredData = searchResult.data.filter(
         (r) => typeof r.score !== "number" || r.score >= minScore,

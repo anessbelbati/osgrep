@@ -1,5 +1,6 @@
 import type { Table } from "@lancedb/lancedb";
 import { CONFIG } from "../../config";
+import { GENERATED_FILE_PATTERNS } from "../index/ignore-patterns";
 import type {
   ChunkType,
   SearchFilter,
@@ -192,6 +193,8 @@ export class Searcher {
     };
   }
 
+  private static readonly GENERATED_PENALTY = 0.4;
+
   private applyStructureBoost(
     record: Partial<VectorRecord>,
     score: number,
@@ -204,6 +207,14 @@ export class Searcher {
     }
 
     const pathStr = (record.path || "").toLowerCase();
+
+    // Generated file penalty - auto-generated code rarely contains business logic
+    const isGenerated = GENERATED_FILE_PATTERNS.some((pattern) =>
+      pattern.test(pathStr),
+    );
+    if (isGenerated) {
+      adjusted *= Searcher.GENERATED_PENALTY;
+    }
 
     // Use path-segment and filename patterns to avoid false positives like "latest"
     const isTestPath =
@@ -273,8 +284,6 @@ export class Searcher {
     return deduped;
   }
 
-  private ftsIndexChecked = false;
-
   async search(
     query: string,
     top_k?: number,
@@ -283,10 +292,18 @@ export class Searcher {
     pathPrefix?: string,
     signal?: AbortSignal,
   ): Promise<SearchResponse> {
+    const DEBUG_TIMING = process.env.DEBUG_SEARCH_TIMING === "1";
+    const DEBUG_ABORT = process.env.DEBUG_SERVER === "1" || process.env.DEBUG_ABORT === "1";
+    const t = (label: string) => DEBUG_TIMING && console.time(`[search] ${label}`);
+    const te = (label: string) => DEBUG_TIMING && console.timeEnd(`[search] ${label}`);
+
+    t("total");
     const finalLimitRaw = top_k ?? 10;
     const finalLimit =
       Number.isFinite(finalLimitRaw) && finalLimitRaw > 0 ? finalLimitRaw : 10;
     const doRerank = options?.rerank ?? true;
+
+    if (DEBUG_ABORT) console.log(`[searcher] start, signal.aborted=${signal?.aborted}`);
 
     if (signal?.aborted) {
       const err = new Error("Aborted");
@@ -294,11 +311,15 @@ export class Searcher {
       throw err;
     }
 
+    t("encodeQuery");
+    if (DEBUG_ABORT) console.log("[searcher] before encodeQuery");
     const {
       dense: queryVector,
       colbert: queryMatrixRaw,
       colbertDim,
     } = await encodeQuery(query);
+    te("encodeQuery");
+    if (DEBUG_ABORT) console.log(`[searcher] after encodeQuery, signal.aborted=${signal?.aborted}`);
 
     if (signal?.aborted) {
       const err = new Error("Aborted");
@@ -342,29 +363,33 @@ export class Searcher {
       finalLimit * Searcher.PRE_RERANK_K_MULT,
       Searcher.PRE_RERANK_K_MIN,
     );
+    t("ensureTable");
     let table: Table;
     try {
       table = await this.db.ensureTable();
     } catch {
+      te("ensureTable");
+      te("total");
       return { data: [] };
     }
+    te("ensureTable");
 
-    // Ensure FTS index exists (lazy init on first search)
-    if (!this.ftsIndexChecked) {
-      this.ftsIndexChecked = true; // Set immediately to prevent retry spam
-      try {
-        await this.db.createFTSIndex();
-      } catch (e) {
-        console.warn("[Searcher] Failed to ensure FTS index:", e);
-      }
-    }
+    // Skip FTS index check during search - it should be created during indexing.
+    // The createFTSIndex call takes ~500ms even when index exists due to LanceDB overhead.
+    // If FTS search fails below, we fall back gracefully.
 
+    t("vectorSearch");
+    if (DEBUG_ABORT) console.log("[searcher] before vectorSearch");
     let vectorQuery = table.vectorSearch(queryVector).limit(PRE_RERANK_K);
     if (whereClause) {
       vectorQuery = vectorQuery.where(whereClause);
     }
     const vectorResults = (await vectorQuery.toArray()) as VectorRecord[];
+    te("vectorSearch");
+    if (DEBUG_ABORT) console.log(`[searcher] after vectorSearch (${vectorResults.length} results), signal.aborted=${signal?.aborted}`);
 
+    t("ftsSearch");
+    if (DEBUG_ABORT) console.log("[searcher] before ftsSearch");
     let ftsResults: VectorRecord[] = [];
     try {
       const ftsText = Searcher.normalizeFtsQuery(query);
@@ -378,6 +403,8 @@ export class Searcher {
       const msg = e instanceof Error ? e.message : String(e);
       console.warn(`[Searcher] FTS search failed: ${msg}`);
     }
+    te("ftsSearch");
+    if (DEBUG_ABORT) console.log(`[searcher] after ftsSearch (${ftsResults.length} results), signal.aborted=${signal?.aborted}`);
 
     if (signal?.aborted) {
       const err = new Error("Aborted");
@@ -415,6 +442,7 @@ export class Searcher {
 
     const rerankCandidates = fused.slice(0, Searcher.RERANK_CANDIDATES_K);
 
+    t("rerank");
     const scores = doRerank
       ? await rerank({
             query: queryMatrixRaw,
@@ -436,6 +464,7 @@ export class Searcher {
           // Small tie-breaker so later items don't all share 0
           return fusedScore || 1 / (idx + 1);
         });
+    te("rerank");
 
     type ScoredItem = {
       record: (typeof rerankCandidates)[number];
@@ -481,6 +510,7 @@ export class Searcher {
     // Item 12: Score Calibration
     const maxScore = finalResults.length > 0 ? finalResults[0]._score : 1.0;
 
+    te("total");
     return {
       data: finalResults.map((r: (typeof finalResults)[number]) => {
         const chunk = this.mapRecordToChunk(r, r._score || 0);

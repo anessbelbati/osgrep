@@ -6,6 +6,7 @@ allowed-tools: "Bash(osgrep:*), Read"
 
 ## What osgrep does
 
+
 Finds code by meaning. When you'd ask a colleague "where do we handle auth?", use osgrep.
 
 - grep/ripgrep: exact string match, fast
