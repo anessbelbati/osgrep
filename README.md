@@ -83,15 +83,20 @@ osgrep "how is the database connection pooled?"
 | `--scores` | Show relevance scores (0-1) for each result. | `false` |
 | `--min-score <n>` | Filter out results below this score threshold. | `0` |
 | `--compact` | Show file paths only (like `grep -l`). | `false` |
+| `--deep` | Include related code (callers, definitions) for architectural context. | `false` |
 | `-s`, `--sync` | Force re-index changed files before searching. | `false` |
 | `-r`, `--reset` | Reset the index and re-index from scratch. | `false` |
+
 **Examples:**
 
 ```bash
 # General concept search
 osgrep "API rate limiting logic"
 
-# Deep dive (show more matches per file)
+# Deep dive with architectural context (shows callers and definitions)
+osgrep "how does authentication work" --deep
+
+# Show more matches per file
 osgrep "error handling" --per-file 5
 
 # Just give me the files
@@ -137,7 +142,7 @@ Runs a lightweight HTTP server with live file watching so searches stay hot in R
 - Keeps LanceDB and the embedding worker resident for <50ms responses.
 - Watches the repo (via chokidar) and incrementally re-indexes on change.
 - Health endpoint: `GET /health`
-- Search endpoint: `POST /search` with `{ query, limit, path, rerank }`
+- Search endpoint: `POST /search` with `{ query, limit, path, deep }`
 - Writes lock: `.osgrep/server.json` with `port`/`pid`
 
 **Options:**

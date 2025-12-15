@@ -12,6 +12,7 @@ import type { InitialSyncProgress } from "../lib/index/sync-helpers";
 import { initialSync } from "../lib/index/syncer";
 import { GraphBuilder } from "../lib/graph/graph-builder";
 import { Searcher } from "../lib/search/searcher";
+import type { ExpandOptions } from "../lib/search/expansion-types";
 import type { MetaEntry } from "../lib/store/meta-cache";
 import { MetaCache } from "../lib/store/meta-cache";
 import type { VectorRecord } from "../lib/store/types";
@@ -568,10 +569,23 @@ export const serve = new Command("serve")
                     }
                   }, timeoutMs);
 
+                  // Parse deep option from request body
+                  let expandOpts: ExpandOptions | undefined;
+                  if (body.deep === true) {
+                    expandOpts = {
+                      maxDepth: 2,
+                      maxExpanded: 20,
+                      maxTokens: 0,
+                      strategies: ["callers", "symbols"],
+                    };
+                  }
+
                   const debug = process.env.DEBUG_SERVER === "1";
                   if (debug) {
                     console.log(
-                      `[serve] Starting search for "${query}", indexing=${isWriting} signal.aborted=${ac.signal.aborted}`,
+                      `[serve] Starting search for "${query}", indexing=${isWriting} signal.aborted=${ac.signal.aborted}${
+                        expandOpts ? " deep=true" : ""
+                      }`,
                     );
                   }
 
@@ -594,6 +608,20 @@ export const serve = new Command("serve")
                     return;
                   }
 
+                  // Expand results if requested
+                  let expanded;
+                  if (expandOpts && result.data.length > 0) {
+                    if (debug) {
+                      console.log(`[serve] Expanding results with depth=${expandOpts.maxDepth}`);
+                    }
+                    expanded = await searcher.expand(result.data, query, expandOpts);
+                    if (debug) {
+                      console.log(
+                        `[serve] Expansion completed, ${expanded.expanded.length} expanded chunks`,
+                      );
+                    }
+                  }
+
                   res.statusCode = 200;
                   res.setHeader("Content-Type", "application/json");
                   const response: {
@@ -604,6 +632,7 @@ export const serve = new Command("serve")
                       filesIndexed: number;
                       totalFiles: number;
                     };
+                    expanded?: typeof expanded;
                   } = { results: result.data };
 
                   if (initialSyncState.inProgress) {
@@ -613,6 +642,10 @@ export const serve = new Command("serve")
                       filesIndexed: initialSyncState.filesIndexed,
                       totalFiles: initialSyncState.totalFiles,
                     };
+                  }
+
+                  if (expanded) {
+                    response.expanded = expanded;
                   }
 
                   res.end(JSON.stringify(response));

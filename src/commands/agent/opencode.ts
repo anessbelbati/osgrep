@@ -80,9 +80,6 @@ Read the specific line range, not the whole file.
 # Trace call graph (who calls X, what X calls)
 osgrep trace handleAuth
 
-# Skeleton of a huge file (to find which ranges to read)
-osgrep skeleton src/giant-2000-line-file.ts
-
 # Just file paths when you only need locations
 osgrep "authentication" --compact
 

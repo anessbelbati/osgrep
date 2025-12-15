@@ -8,6 +8,11 @@ import {
 } from "../lib/index/sync-helpers";
 import { initialSync } from "../lib/index/syncer";
 import { Searcher } from "../lib/search/searcher";
+import type {
+  ExpandedResult,
+  ExpandOptions,
+  ExpansionNode,
+} from "../lib/search/expansion-types";
 import { ensureSetup } from "../lib/setup/setup-helpers";
 import type {
   ChunkType,
@@ -20,6 +25,115 @@ import { formatTextResults, type TextResult } from "../lib/utils/formatter";
 import { isLocked } from "../lib/utils/lock";
 import { ensureProjectPaths, findProjectRoot } from "../lib/utils/project-root";
 import { getServerForProject, unregisterServer } from "../lib/utils/server-registry";
+
+/**
+ * Get expand options for --deep mode.
+ * Sweet spot config: callers + symbols at depth 2.
+ */
+function getDeepExpandOptions(deep: boolean): ExpandOptions | undefined {
+  if (!deep) return undefined;
+
+  return {
+    maxDepth: 2,
+    maxExpanded: 20,
+    maxTokens: 0,
+    strategies: ["callers", "symbols"],
+  };
+}
+
+/**
+ * Format expanded results for plain text output.
+ */
+function formatExpandedPlain(
+  expanded: ExpandedResult,
+  projectRoot: string,
+): string {
+  const lines: string[] = [];
+
+  // Stats header
+  const { stats } = expanded;
+  lines.push(
+    `\n--- Expanded Results (${expanded.expanded.length} chunks) ---`,
+  );
+  lines.push(
+    `symbols: ${stats.symbolsResolved} | callers: ${stats.callersFound} | neighbors: ${stats.neighborsAdded}${
+      stats.budgetRemaining !== undefined
+        ? ` | tokens: ${stats.totalTokens} (${stats.budgetRemaining} remaining)`
+        : ""
+    }${expanded.truncated ? " [truncated]" : ""}`,
+  );
+  lines.push("");
+
+  // Group by relationship type
+  const byRelation = new Map<string, ExpansionNode[]>();
+  for (const node of expanded.expanded) {
+    const key = node.relationship;
+    if (!byRelation.has(key)) byRelation.set(key, []);
+    byRelation.get(key)!.push(node);
+  }
+
+  for (const [relation, nodes] of byRelation) {
+    lines.push(`[${relation}]`);
+    for (const node of nodes) {
+      const rawPath =
+        typeof (node.chunk.metadata as FileMetadata | undefined)?.path ===
+        "string"
+          ? ((node.chunk.metadata as FileMetadata).path as string)
+          : "Unknown";
+      const relPath = path.isAbsolute(rawPath)
+        ? path.relative(projectRoot, rawPath)
+        : rawPath;
+      const start = node.chunk.generated_metadata?.start_line ?? 0;
+      const defined = node.chunk.defined_symbols?.slice(0, 3).join(", ") || "";
+      lines.push(
+        `  ${relPath}:${start + 1} via="${node.via}" d=${node.depth}${
+          defined ? ` [${defined}]` : ""
+        }`,
+      );
+    }
+    lines.push("");
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * Format expanded results in compact TSV format.
+ */
+function formatExpandedCompact(
+  expanded: ExpandedResult,
+  projectRoot: string,
+): string {
+  const lines: string[] = [];
+  lines.push(`expanded\tcount=${expanded.expanded.length}\ttruncated=${expanded.truncated}`);
+  lines.push("path\tlines\trelation\tvia\tdepth\tdefined");
+
+  for (const node of expanded.expanded) {
+    const rawPath =
+      typeof (node.chunk.metadata as FileMetadata | undefined)?.path === "string"
+        ? ((node.chunk.metadata as FileMetadata).path as string)
+        : "Unknown";
+    const relPath = path.isAbsolute(rawPath)
+      ? path.relative(projectRoot, rawPath)
+      : rawPath;
+    const start = node.chunk.generated_metadata?.start_line ?? 0;
+    const end = node.chunk.generated_metadata?.end_line ?? start;
+    const defined = node.chunk.defined_symbols?.slice(0, 3).join(",") || "-";
+
+    lines.push(
+      [
+        relPath,
+        `${start + 1}-${end + 1}`,
+        node.relationship,
+        node.via,
+        String(node.depth),
+        defined,
+      ].join("\t"),
+    );
+  }
+
+  return lines.join("\n");
+}
 
 function toTextResults(data: SearchResponse["data"]): TextResult[] {
   return data.map((r) => {
@@ -282,6 +396,12 @@ export const search: Command = new CommanderCommand("search")
   .option("--plain", "Disable ANSI colors and use simpler formatting", false)
 
   .option(
+    "--deep",
+    "Include related code (callers, definitions) for architectural context",
+    false,
+  )
+
+  .option(
     "-s, --sync",
     "Syncs the local files to the store before searching",
     false,
@@ -304,6 +424,7 @@ export const search: Command = new CommanderCommand("search")
       minScore: string;
       compact: boolean;
       plain: boolean;
+      deep: boolean;
       sync: boolean;
       dryRun: boolean;
     } = cmd.optsWithGlobals();
@@ -389,6 +510,7 @@ export const search: Command = new CommanderCommand("search")
                 path: exec_path
                   ? path.relative(projectRootForServer, path.resolve(exec_path))
                   : undefined,
+                deep: options.deep,
               }),
               signal: ac.signal,
             },
@@ -409,6 +531,7 @@ export const search: Command = new CommanderCommand("search")
                 filesIndexed: number;
                 totalFiles: number;
               };
+              expanded?: ExpandedResult;
             };
 
             // Show warning if results are partial (server still indexing)
@@ -441,6 +564,11 @@ export const search: Command = new CommanderCommand("search")
                 )
                 : "No matches found.";
               console.log(compactText);
+              // Add expanded results in compact format
+              if (body.expanded && body.expanded.expanded.length > 0) {
+                console.log("");
+                console.log(formatExpandedCompact(body.expanded, projectRootForServer));
+              }
               return; // EXIT
             }
 
@@ -467,12 +595,20 @@ export const search: Command = new CommanderCommand("search")
                 },
               );
               console.log(output);
+              // Add expanded results
+              if (body.expanded && body.expanded.expanded.length > 0) {
+                console.log(formatExpandedPlain(body.expanded, projectRootForServer));
+              }
             } else {
               const { formatResults } = await import("../lib/output/formatter");
               const output = formatResults(filteredData, projectRootForServer, {
                 content: options.content,
               });
               console.log(output);
+              // Add expanded results in plain format
+              if (body.expanded && body.expanded.expanded.length > 0) {
+                console.log(formatExpandedPlain(body.expanded, projectRootForServer));
+              }
             }
 
             return; // EXIT successful server search
@@ -593,6 +729,7 @@ export const search: Command = new CommanderCommand("search")
       }
 
       const searcher = new Searcher(vectorDb);
+      const expandOpts = getDeepExpandOptions(options.deep);
 
       t("searcher.search");
       const searchResult = await searcher.search(
@@ -603,6 +740,15 @@ export const search: Command = new CommanderCommand("search")
         exec_path ? path.relative(projectRoot, path.resolve(exec_path)) : "",
       );
       te("searcher.search");
+
+      // Expand results if requested (Phase 1-4 expansion)
+      let expanded: ExpandedResult | undefined;
+      if (expandOpts && searchResult.data.length > 0) {
+        t("searcher.expand");
+        expanded = await searcher.expand(searchResult.data, pattern, expandOpts);
+        te("searcher.expand");
+      }
+
       te("total-cmd");
 
       const filteredData = searchResult.data.filter(
@@ -627,6 +773,11 @@ export const search: Command = new CommanderCommand("search")
 
       if (options.compact) {
         console.log(compactText);
+        // Add expanded results in compact format
+        if (expanded && expanded.expanded.length > 0) {
+          console.log("");
+          console.log(formatExpandedCompact(expanded, projectRoot));
+        }
         return;
       }
 
@@ -643,6 +794,10 @@ export const search: Command = new CommanderCommand("search")
           showScores: options.scores,
         });
         console.log(output);
+        // Add expanded results
+        if (expanded && expanded.expanded.length > 0) {
+          console.log(formatExpandedPlain(expanded, projectRoot));
+        }
       } else {
         // Use new holographic formatter for TTY
         const { formatResults } = await import("../lib/output/formatter");
@@ -650,6 +805,10 @@ export const search: Command = new CommanderCommand("search")
           content: options.content,
         });
         console.log(output);
+        // Add expanded results in plain format (for now)
+        if (expanded && expanded.expanded.length > 0) {
+          console.log(formatExpandedPlain(expanded, projectRoot));
+        }
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";

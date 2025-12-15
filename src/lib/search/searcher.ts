@@ -10,6 +10,8 @@ import type {
 import type { VectorDB } from "../store/vector-db";
 import { escapeSqlString, normalizePath } from "../utils/filter-builder";
 import { encodeQuery, rerank } from "../workers/orchestrator";
+import { Expander } from "./expander";
+import type { ExpandedResult, ExpandOptions } from "./expansion-types";
 
 export class Searcher {
   constructor(private db: VectorDB) {}
@@ -526,6 +528,66 @@ export class Searcher {
         chunk.confidence = confidence;
         return chunk;
       }),
+    };
+  }
+
+  /**
+   * Expand search results to include related chunks.
+   * This is opt-in and adds no overhead when not used.
+   *
+   * @param results Original search results
+   * @param query The original search query
+   * @param opts Expansion options
+   * @returns Expanded results with relationship metadata
+   */
+  async expand(
+    results: ChunkType[],
+    query: string,
+    opts?: ExpandOptions,
+  ): Promise<ExpandedResult> {
+    const expander = new Expander(this.db);
+    return expander.expand(results, query, opts);
+  }
+
+  /**
+   * Search and expand in one call.
+   *
+   * @param query Search query
+   * @param top_k Number of results
+   * @param searchOpts Search options
+   * @param filters Search filters
+   * @param pathPrefix Path prefix filter
+   * @param signal Abort signal
+   * @param expandOpts Expansion options (if provided, results will be expanded)
+   * @returns Search response with optional expansion
+   */
+  async searchAndExpand(
+    query: string,
+    top_k?: number,
+    searchOpts?: { rerank?: boolean },
+    filters?: SearchFilter,
+    pathPrefix?: string,
+    signal?: AbortSignal,
+    expandOpts?: ExpandOptions,
+  ): Promise<SearchResponse & { expanded?: ExpandedResult }> {
+    const searchResult = await this.search(
+      query,
+      top_k,
+      searchOpts,
+      filters,
+      pathPrefix,
+      signal,
+    );
+
+    if (!expandOpts) {
+      return searchResult;
+    }
+
+    const expanded = await this.expand(searchResult.data, query, expandOpts);
+
+    return {
+      ...searchResult,
+      expanded,
     };
   }
 }
