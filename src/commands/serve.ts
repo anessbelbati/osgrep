@@ -8,7 +8,7 @@ import { Command } from "commander";
 import { PATHS } from "../config";
 import { ensureGrammars } from "../lib/index/grammar-loader";
 import { DEFAULT_IGNORE_PATTERNS } from "../lib/index/ignore-patterns";
-import { createIndexingSpinner } from "../lib/index/sync-helpers";
+import type { InitialSyncProgress } from "../lib/index/sync-helpers";
 import { initialSync } from "../lib/index/syncer";
 import { GraphBuilder } from "../lib/graph/graph-builder";
 import { Searcher } from "../lib/search/searcher";
@@ -116,6 +116,21 @@ export const serve = new Command("serve")
       // Serialize DB writes (and optionally searches) to avoid LanceDB contention.
       let dbWriteBarrier: Promise<void> = Promise.resolve();
       let isWriting = false;
+
+      // Track initial sync state for HTTP endpoints
+      let initialSyncState: {
+        inProgress: boolean;
+        filesProcessed: number;
+        filesIndexed: number;
+        totalFiles: number;
+        currentFile: string;
+      } = {
+        inProgress: true,
+        filesProcessed: 0,
+        filesIndexed: 0,
+        totalFiles: 0,
+        currentFile: "Starting...",
+      };
 
       // Live indexing: watch filesystem changes and incrementally update the index.
       // Enabled by default for `serve` (can disable with OSGREP_WATCH=0).
@@ -423,31 +438,31 @@ export const serve = new Command("serve")
         }
       }
 
-      // Only show spinner if not in background (or check isTTY)
-      // If spawned in background with stdio ignore, console.log goes nowhere.
-      // But we might want to log to a file in the future.
+      // Helper to run initial sync after server is listening
+      const runInitialSync = async () => {
+        const onProgress = (info: InitialSyncProgress) => {
+          initialSyncState.filesProcessed = info.processed;
+          initialSyncState.filesIndexed = info.indexed;
+          initialSyncState.totalFiles = info.total;
+          initialSyncState.currentFile = info.filePath ?? "";
+        };
 
-      if (!process.env.OSGREP_BACKGROUND) {
-        const { spinner, onProgress } = createIndexingSpinner(
-          projectRoot,
-          "Indexing before starting server...",
-        );
         try {
-          await initialSync({
-            projectRoot,
-            onProgress,
-          });
+          await initialSync({ projectRoot, onProgress });
           await vectorDb.createFTSIndex();
-          spinner.succeed("Initial index ready. Starting server...");
+          initialSyncState.inProgress = false;
+          initialSyncState.currentFile = "";
+
+          if (!process.env.OSGREP_BACKGROUND) {
+            console.log("Initial index ready.");
+          }
         } catch (e) {
-          spinner.fail("Indexing failed");
-          throw e;
+          console.error("Initial sync failed:", e);
+          // Mark as done but leave currentFile as error indicator
+          initialSyncState.inProgress = false;
+          initialSyncState.currentFile = "sync_failed";
         }
-      } else {
-        // In background, just sync quietly
-        await initialSync({ projectRoot });
-        await vectorDb.createFTSIndex();
-      }
+      };
 
       const server = http.createServer(async (req, res) => {
         try {
@@ -456,7 +471,16 @@ export const serve = new Command("serve")
             res.setHeader("Content-Type", "application/json");
             res.end(
               JSON.stringify({
-                status: "ok",
+                status: initialSyncState.inProgress ? "initializing" : "ok",
+                initialSync: initialSyncState.inProgress
+                  ? {
+                      inProgress: true,
+                      filesProcessed: initialSyncState.filesProcessed,
+                      filesIndexed: initialSyncState.filesIndexed,
+                      totalFiles: initialSyncState.totalFiles,
+                      currentFile: initialSyncState.currentFile,
+                    }
+                  : null,
                 indexing: isWriting,
                 watch: watchEnabled,
               }),
@@ -572,7 +596,26 @@ export const serve = new Command("serve")
 
                   res.statusCode = 200;
                   res.setHeader("Content-Type", "application/json");
-                  res.end(JSON.stringify({ results: result.data }));
+                  const response: {
+                    results: typeof result.data;
+                    partial?: boolean;
+                    initialSync?: {
+                      filesProcessed: number;
+                      filesIndexed: number;
+                      totalFiles: number;
+                    };
+                  } = { results: result.data };
+
+                  if (initialSyncState.inProgress) {
+                    response.partial = true;
+                    response.initialSync = {
+                      filesProcessed: initialSyncState.filesProcessed,
+                      filesIndexed: initialSyncState.filesIndexed,
+                      totalFiles: initialSyncState.totalFiles,
+                    };
+                  }
+
+                  res.end(JSON.stringify(response));
                 } finally {
                   if (timeout) clearTimeout(timeout);
                 }
@@ -730,12 +773,18 @@ export const serve = new Command("serve")
           console.log(
             `osgrep server listening on http://localhost:${actualPort} (${projectRoot})`,
           );
+          console.log("Starting initial index...");
         }
         registerServer({
           pid: process.pid,
           port: actualPort,
           projectRoot,
           startTime: Date.now(),
+        });
+
+        // Start initial sync after server is listening (non-blocking)
+        runInitialSync().catch((err) => {
+          console.error("Initial sync error:", err);
         });
       });
 

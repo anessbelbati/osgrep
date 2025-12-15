@@ -401,7 +401,23 @@ export const search: Command = new CommanderCommand("search")
             if (process.env.DEBUG_SERVER) {
               console.error("[search] server returned OK, using server results");
             }
-            const body = (await response.json()) as { results: any[] };
+            const body = (await response.json()) as {
+              results: any[];
+              partial?: boolean;
+              initialSync?: {
+                filesProcessed: number;
+                filesIndexed: number;
+                totalFiles: number;
+              };
+            };
+
+            // Show warning if results are partial (server still indexing)
+            if (body.partial && body.initialSync) {
+              const { filesProcessed, filesIndexed } = body.initialSync;
+              console.warn(
+                `⚠️  Index building (${filesProcessed} files processed, ${filesIndexed} indexed). Results may be incomplete.`,
+              );
+            }
 
             const searchResult = { data: body.results };
             const filteredData = searchResult.data.filter(

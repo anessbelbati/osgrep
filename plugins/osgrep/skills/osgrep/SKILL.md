@@ -1,6 +1,6 @@
 ---
 name: osgrep
-description: Semantic code search. Use alongside grep - grep for exact strings, osgrep for concepts.
+description: Semantic code search and call tracing. Use alongside grep - grep for exact strings, osgrep for concepts and call flow.
 allowed-tools: "Bash(osgrep:*), Read"
 ---
 
@@ -46,6 +46,38 @@ Read src/auth/handler.ts:45-120
 ```
 
 Read the specific line range, not the whole file.
+
+## Trace command
+
+When you need to understand call flow (who calls what, what calls who):
+
+```bash
+osgrep trace handleRequest
+```
+
+**Output:**
+```
+handleRequest
+  def: src/server/handler.ts:45
+  calls: validateAuth routeRequest sendResponse
+  called_by: src/index.ts:12 src/api/router.ts:87
+```
+
+Use trace when:
+- You found a function and need to know what calls it
+- You need to understand what a function depends on
+- You're tracing request/data flow through the codebase
+
+```bash
+# Only callers (who calls this?)
+osgrep trace handleAuth --callers
+
+# Only callees (what does this call?)
+osgrep trace handleAuth --callees
+
+# Filter to specific path
+osgrep trace validateToken --path src/auth
+```
 
 ## Other options
 ```bash

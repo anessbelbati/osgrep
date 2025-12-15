@@ -13,10 +13,120 @@ const style = {
 };
 
 /**
+ * Dedupe and count callees. Returns "foo bar baz" or "foo bar (x3) baz" for repeats.
+ */
+function formatCallees(callees: string[]): string {
+  const counts = new Map<string, number>();
+  for (const c of callees) {
+    counts.set(c, (counts.get(c) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([name, count]) => (count > 1 ? `${name} (x${count})` : name))
+    .join(" ");
+}
+
+/**
+ * Group callers by file. Returns map of file -> line numbers.
+ */
+function groupCallersByFile(
+  callers: Array<{ file: string; line: number; symbol: string }>,
+): Map<string, number[]> {
+  const byFile = new Map<string, number[]>();
+  for (const c of callers) {
+    const lines = byFile.get(c.file) || [];
+    lines.push(c.line);
+    byFile.set(c.file, lines);
+  }
+  // Sort lines within each file
+  for (const lines of byFile.values()) {
+    lines.sort((a, b) => a - b);
+  }
+  return byFile;
+}
+
+/**
+ * Count total items for format decision.
+ */
+function countItems(graph: CallGraph): number {
+  const uniqueCallees = new Set(graph.callees).size;
+  const callerFiles = groupCallersByFile(graph.callers).size;
+  return uniqueCallees + callerFiles;
+}
+
+/**
  * Format call graph for minimal agent-friendly output.
- * Format: file:line (space-separated for multiple)
+ * Uses tree format for small results, compact grouped format for large.
  */
 function formatPlain(graph: CallGraph, symbol: string): string {
+  const itemCount = countItems(graph);
+
+  // Use tree format for small results (cleaner), compact for large
+  if (itemCount <= 10) {
+    return formatPlainTree(graph, symbol);
+  }
+  return formatPlainCompact(graph, symbol);
+}
+
+/**
+ * Tree format for small results - cleaner to read.
+ */
+function formatPlainTree(graph: CallGraph, symbol: string): string {
+  const lines: string[] = [];
+
+  if (graph.center) {
+    lines.push(`${symbol} (${graph.center.file}:${graph.center.line})`);
+  } else {
+    lines.push(`${symbol} (not found)`);
+  }
+
+  const hasCallees = graph.callees.length > 0;
+  const hasCallers = graph.callers.length > 0;
+
+  if (hasCallees) {
+    const branch = hasCallers ? "├──" : "└──";
+    lines.push(`${branch} calls:`);
+
+    // Dedupe callees
+    const counts = new Map<string, number>();
+    for (const c of graph.callees) {
+      counts.set(c, (counts.get(c) || 0) + 1);
+    }
+    const calleeList = [...counts.entries()];
+
+    calleeList.forEach(([name, count], i) => {
+      const prefix = hasCallers ? "│   " : "    ";
+      const sym = i === calleeList.length - 1 ? "└──" : "├──";
+      const countStr = count > 1 ? ` (x${count})` : "";
+      lines.push(`${prefix}${sym} ${name}${countStr}`);
+    });
+  }
+
+  if (hasCallers) {
+    lines.push("└── called by:");
+    const byFile = groupCallersByFile(graph.callers);
+    const files = [...byFile.entries()];
+
+    files.forEach(([file, fileLines], i) => {
+      const sym = i === files.length - 1 ? "└──" : "├──";
+      const lineStr =
+        fileLines.length === 1
+          ? `line ${fileLines[0]}`
+          : `lines ${fileLines.join(", ")}`;
+      lines.push(`    ${sym} ${file}: ${lineStr}`);
+    });
+  }
+
+  if (!hasCallees && !hasCallers) {
+    lines.push("    (no callers or callees found)");
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * Compact grouped format for large results.
+ */
+function formatPlainCompact(graph: CallGraph, symbol: string): string {
   const lines: string[] = [];
   lines.push(symbol);
 
@@ -27,14 +137,19 @@ function formatPlain(graph: CallGraph, symbol: string): string {
   }
 
   if (graph.callees.length > 0) {
-    lines.push(`  calls: ${graph.callees.join(" ")}`);
+    lines.push(`  calls: ${formatCallees(graph.callees)}`);
   }
 
   if (graph.callers.length > 0) {
-    const callerLocs = graph.callers
-      .map((c) => `${c.file}:${c.line}`)
-      .join(" ");
-    lines.push(`  called_by: ${callerLocs}`);
+    lines.push("  called_by:");
+    const byFile = groupCallersByFile(graph.callers);
+    for (const [file, fileLines] of byFile) {
+      const lineStr =
+        fileLines.length === 1
+          ? `line ${fileLines[0]}`
+          : `lines ${fileLines.join(", ")}`;
+      lines.push(`    ${file}: ${lineStr}`);
+    }
   }
 
   return lines.join("\n");

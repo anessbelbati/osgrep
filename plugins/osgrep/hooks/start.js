@@ -75,8 +75,8 @@ function main() {
       hookEventName: "SessionStart",
       additionalContext:
         existing
-          ? `osgrep serve already running (PID: ${existing.pid}, Port: ${existing.port}).`
-          : 'osgrep serve started; prefer `osgrep "<complete question>"` over grep (plain output is agent-friendly).',
+          ? `osgrep serve running (PID: ${existing.pid}, Port: ${existing.port}).`
+          : 'osgrep serve starting (indexing in background). Searches work immediately but may show partial results until indexing completes.',
     },
   };
   process.stdout.write(JSON.stringify(response));

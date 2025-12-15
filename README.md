@@ -184,6 +184,59 @@ osgrep serve stop --all
 
 Claude Code hooks start/stop this automatically; you rarely need to run it manually.
 
+### `osgrep trace`
+
+Shows callers and callees for a symbol in one shot — replaces multiple search/read cycles when tracing code flow.
+
+```bash
+osgrep trace handleRequest
+```
+
+**Output (default plain format):**
+```
+handleRequest
+  def: src/server/handler.ts:45
+  calls: validateAuth routeRequest sendResponse
+  called_by: src/index.ts:12 src/api/router.ts:87
+```
+
+**Options:**
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--depth <n>` | Traversal depth for nested calls | `1` |
+| `--callers` | Show only callers (who calls this) | `false` |
+| `--callees` | Show only callees (what this calls) | `false` |
+| `--path <prefix>` | Filter results to path prefix | - |
+| `--pretty` | Tree view output for humans | `false` |
+| `--json` | JSON output for programmatic use | `false` |
+
+**Examples:**
+
+```bash
+# Basic trace
+osgrep trace Searcher
+
+# Only show what calls this function
+osgrep trace handleAuth --callers
+
+# Only show what this function calls
+osgrep trace handleAuth --callees
+
+# Filter to specific directory
+osgrep trace validateToken --path src/auth
+
+# Pretty tree output
+osgrep trace processRequest --pretty
+```
+
+**Server endpoint:**
+```bash
+curl -X POST http://localhost:4444/trace \
+  -H "Content-Type: application/json" \
+  -d '{"symbol": "Searcher", "depth": 1, "callers": true}'
+```
+
 ### `osgrep list`
 
 Lists all indexed repositories (stores) and their metadata.
