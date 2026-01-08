@@ -1,4 +1,19 @@
-> **Note:** This is a modified fork with experimental cloud provider support (OpenRouter, ZeroEntropy). Not fully tested yet - use at your own risk. Feel free to grab it if you find it useful!
+> **Note:** This is a modified fork - not production ready, use at your own risk!
+>
+> **What changed:**
+> - Added `.env` file support (dotenv) for API keys
+> - Added cloud provider support (OpenRouter for embeddings, ZeroEntropy for reranking)
+> - Created `.env.example` template
+>
+> **Known limitations (hardcoded values in `src/config.ts`):**
+> - Models: `granite-embedding-30m-english` (local), `qwen/qwen3-embedding-8b` (cloud)
+> - Reranker: `mxbai-edge-colbert` (local), `zerank-2` (cloud)
+> - Max chunk size: 2000 chars / 75 lines
+> - Max file size: 2MB
+> - Worker threads: 4 (local) / 14 (cloud)
+> - Vector dimensions: 384 (local) / 4096 (cloud) - **changing models will break things**
+>
+> Feel free to grab it if you find it useful!
 
 <div align="center">
   <h1>osgrep</h1>
