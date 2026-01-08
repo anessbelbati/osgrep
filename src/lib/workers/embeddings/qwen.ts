@@ -8,7 +8,7 @@
  *   - QWEN_MODEL: Model name (optional, defaults to Qwen/Qwen3-Embedding-8B)
  */
 
-import { CLOUD_API, CONFIG } from "../../../config";
+import { CLOUD_API } from "../../../config";
 
 const LOG_MODELS =
     process.env.OSGREP_DEBUG_MODELS === "1" ||
@@ -32,7 +32,6 @@ interface QwenEmbeddingResponse {
 }
 
 export class QwenModel {
-    private readonly vectorDimensions = CONFIG.VECTOR_DIM;
     private readonly maxRetries = 3;
     private readonly retryDelayMs = 1000;
     // Parallel API calls for faster embedding

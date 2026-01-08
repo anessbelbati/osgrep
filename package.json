@@ -15,9 +15,7 @@
     "osgrep": "dist/index.js"
   },
   "scripts": {
-    "prebuild": "mkdir -p dist",
     "build": "tsc",
-    "postbuild": "chmod +x dist/index.js",
     "dev": "npx tsc && node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
