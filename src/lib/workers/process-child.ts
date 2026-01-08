@@ -5,21 +5,26 @@ import processFile, {
   type ProcessFileResult,
   type RerankDoc,
   rerank,
+  rerankWithText,
+  type RerankWithTextInput,
+  type RerankWithTextResult,
 } from "./worker";
 
 type IncomingMessage =
   | { id: number; method: "processFile"; payload: ProcessFileInput }
   | { id: number; method: "encodeQuery"; payload: { text: string } }
   | {
-      id: number;
-      method: "rerank";
-      payload: { query: number[][]; docs: RerankDoc[]; colbertDim: number };
-    };
+    id: number;
+    method: "rerank";
+    payload: { query: number[][]; docs: RerankDoc[]; colbertDim: number };
+  }
+  | { id: number; method: "rerankWithText"; payload: RerankWithTextInput };
 
 type OutgoingMessage =
   | { id: number; result: ProcessFileResult }
   | { id: number; result: Awaited<ReturnType<typeof encodeQuery>> }
   | { id: number; result: Awaited<ReturnType<typeof rerank>> }
+  | { id: number; result: RerankWithTextResult }
   | { id: number; error: string }
   | { id: number; heartbeat: true };
 
@@ -47,6 +52,11 @@ process.on("message", async (msg: IncomingMessage) => {
     }
     if (method === "rerank") {
       const result = await rerank(payload);
+      send({ id, result });
+      return;
+    }
+    if (method === "rerankWithText") {
+      const result = await rerankWithText(payload);
       send({ id, result });
       return;
     }

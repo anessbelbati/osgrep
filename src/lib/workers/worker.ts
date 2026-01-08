@@ -4,8 +4,13 @@ import {
   type RerankDoc,
   WorkerOrchestrator,
 } from "./orchestrator";
+import type {
+  RerankWithTextInput,
+  RerankWithTextResult,
+} from "./rerankers/zerank";
 
 export type { ProcessFileInput, ProcessFileResult, RerankDoc };
+export type { RerankWithTextInput, RerankWithTextResult };
 
 const orchestrator = new WorkerOrchestrator();
 
@@ -26,4 +31,10 @@ export async function rerank(input: {
   colbertDim: number;
 }) {
   return orchestrator.rerank(input);
+}
+
+export async function rerankWithText(
+  input: RerankWithTextInput,
+): Promise<RerankWithTextResult> {
+  return orchestrator.rerankWithText(input);
 }

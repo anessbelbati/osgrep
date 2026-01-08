@@ -283,6 +283,40 @@ osgrep "helper functions"
 
 Stores are isolated automatically — no manual `--store` flags needed!
 
+### Cloud Providers (Optional)
+
+By default, osgrep runs 100% locally. For higher quality embeddings or reranking, you can use cloud providers.
+
+**Setup:**
+```bash
+cp .env.example .env
+# Edit .env with your API keys
+```
+
+**Available Providers:**
+
+| Provider | Purpose | Environment Variables |
+| --- | --- | --- |
+| [OpenRouter](https://openrouter.ai/keys) | Cloud embeddings (Qwen) | `QWEN_API_KEY` |
+| [ZeroEntropy](https://zeroentropy.dev) | Cloud reranking | `ZEROENTROPY_API_KEY` |
+
+**Enable cloud providers:**
+```bash
+# In your .env file:
+OSGREP_EMBED_PROVIDER=qwen        # Use OpenRouter for embeddings
+OSGREP_RERANK_PROVIDER=zeroentropy # Use ZeroEntropy for reranking
+
+QWEN_API_KEY=your-openrouter-key
+ZEROENTROPY_API_KEY=your-zeroentropy-key
+```
+
+Or set environment variables directly:
+```bash
+export OSGREP_EMBED_PROVIDER=qwen
+export QWEN_API_KEY=your-key
+osgrep "query"
+```
+
 ### Ignoring Files
 
 osgrep respects both `.gitignore` and `.osgrepignore` files when indexing. Create a `.osgrepignore` file in your repository root to exclude additional files or patterns from indexing.

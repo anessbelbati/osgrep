@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { env } from "@huggingface/transformers";
 import * as ort from "onnxruntime-node";
 import { v4 as uuidv4 } from "uuid";
-import { CONFIG, PATHS } from "../../config";
+import { CONFIG, PATHS, PROVIDERS } from "../../config";
 import {
   buildAnchorChunk,
   type ChunkWithContext,
@@ -21,6 +21,27 @@ import {
 import { maxSim } from "./colbert-math";
 import { ColbertModel, type HybridResult } from "./embeddings/colbert";
 import { GraniteModel } from "./embeddings/granite";
+import { QwenModel } from "./embeddings/qwen";
+import {
+  zerankRerank,
+  type RerankWithTextInput,
+  type RerankWithTextResult,
+} from "./rerankers/zerank";
+
+// Embedding model interface for provider abstraction
+interface EmbedModel {
+  isReady(): boolean;
+  load(): Promise<void>;
+  runBatch(texts: string[]): Promise<Float32Array[]>;
+}
+
+// Create embedding model based on provider config
+function createEmbedModel(): EmbedModel {
+  if (PROVIDERS.embed === "qwen") {
+    return new QwenModel();
+  }
+  return new GraniteModel();
+}
 
 export type ProcessFileInput = {
   path: string;
@@ -63,26 +84,34 @@ if (fs.existsSync(LOCAL_MODELS)) {
 }
 
 export class WorkerOrchestrator {
-  private granite = new GraniteModel();
+  private embedModel: EmbedModel = createEmbedModel();
   private colbert = new ColbertModel();
   private chunker = new TreeSitterChunker();
   private skeletonizer = new Skeletonizer();
   private initPromise: Promise<void> | null = null;
   private readonly vectorDimensions = CONFIG.VECTOR_DIM;
+  private readonly useLocalColbert = PROVIDERS.embed === "local";
 
   private async ensureReady() {
-    if (this.granite.isReady() && this.colbert.isReady()) {
-      return;
+    // For cloud providers, only check chunker/skeletonizer readiness
+    if (this.useLocalColbert) {
+      if (this.embedModel.isReady() && this.colbert.isReady()) {
+        return;
+      }
     }
     if (this.initPromise) return this.initPromise;
 
     this.initPromise = (async () => {
-      await Promise.all([
+      const loadTasks = [
         this.chunker.init(),
         this.skeletonizer.init(),
-        this.granite.load(),
-        this.colbert.load(),
-      ]);
+        this.embedModel.load(),
+      ];
+      // Only load ColBERT for local embeddings (cloud uses Jina reranker)
+      if (this.useLocalColbert) {
+        loadTasks.push(this.colbert.load());
+      }
+      await Promise.all(loadTasks);
     })().finally(() => {
       this.initPromise = null;
     });
@@ -97,6 +126,22 @@ export class WorkerOrchestrator {
     if (!texts.length) return [];
     await this.ensureReady();
 
+    // For cloud providers, send ALL texts at once - the provider handles parallelism
+    if (!this.useLocalColbert) {
+      onProgress?.();
+      const denseBatch = await this.embedModel.runBatch(texts);
+      onProgress?.();
+
+      return denseBatch.map((dense) => ({
+        dense,
+        colbert: new Int8Array(0),
+        scale: 1,
+        pooled_colbert_48d: undefined,
+        token_ids: undefined,
+      }));
+    }
+
+    // For local providers, batch to avoid memory issues with ONNX
     const results: HybridResult[] = [];
     const envBatch = Number.parseInt(
       process.env.OSGREP_WORKER_BATCH_SIZE ?? "",
@@ -106,10 +151,13 @@ export class WorkerOrchestrator {
       Number.isFinite(envBatch) && envBatch > 0
         ? Math.max(4, Math.min(16, envBatch))
         : 16;
+
     for (let i = 0; i < texts.length; i += BATCH_SIZE) {
       if (i > 0) onProgress?.();
       const batchTexts = texts.slice(i, i + BATCH_SIZE);
-      const denseBatch = await this.granite.runBatch(batchTexts);
+      const denseBatch = await this.embedModel.runBatch(batchTexts);
+
+      // Local: compute ColBERT embeddings for reranking
       const colbertBatch = await this.colbert.runBatch(
         batchTexts,
         denseBatch,
@@ -283,7 +331,17 @@ export class WorkerOrchestrator {
   }> {
     await this.ensureReady();
 
-    const [denseVector] = await this.granite.runBatch([text]);
+    const [denseVector] = await this.embedModel.runBatch([text]);
+
+    // For cloud providers, we don't have ColBERT - return empty matrix
+    if (!this.useLocalColbert) {
+      return {
+        dense: Array.from(denseVector ?? []),
+        colbert: [],
+        colbertDim: CONFIG.COLBERT_DIM,
+        pooled_colbert_48d: undefined,
+      };
+    }
 
     const encoded = await this.colbert.encodeQuery(text);
 
@@ -409,5 +467,17 @@ export class WorkerOrchestrator {
           : undefined;
       return maxSim(queryMatrix, docMatrix, tokenIds);
     });
+  }
+
+  /**
+   * Rerank documents using text content (ZeroEntropy zerank-2)
+   */
+  async rerankWithText(input: RerankWithTextInput): Promise<RerankWithTextResult> {
+    if (PROVIDERS.rerank !== "zeroentropy") {
+      throw new Error(
+        "rerankWithText requires OSGREP_RERANK_PROVIDER=zeroentropy",
+      );
+    }
+    return zerankRerank(input);
   }
 }

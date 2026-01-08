@@ -1,5 +1,5 @@
 import type { Table } from "@lancedb/lancedb";
-import { CONFIG } from "../../config";
+import { CONFIG, PROVIDERS } from "../../config";
 import type {
   ChunkType,
   SearchFilter,
@@ -9,10 +9,11 @@ import type {
 import type { VectorDB } from "../store/vector-db";
 import { escapeSqlString, normalizePath } from "../utils/filter-builder";
 import { getWorkerPool } from "../workers/pool";
+import { zerankRerank } from "../workers/rerankers/zerank";
 import { detectIntent, type SearchIntent } from "./intent";
 
 export class Searcher {
-  constructor(private db: VectorDB) {}
+  constructor(private db: VectorDB) { }
 
   private mapRecordToChunk(
     record: Partial<VectorRecord>,
@@ -482,29 +483,44 @@ export class Searcher {
 
     const rerankCandidates = stage2Candidates.slice(0, RERANK_TOP);
 
-    const scores = doRerank
-      ? await pool.rerank(
-          {
-            query: queryMatrixRaw,
-            docs: rerankCandidates.map((doc) => ({
-              colbert: (doc.colbert as Buffer | Int8Array | number[]) ?? [],
-              scale:
-                typeof doc.colbert_scale === "number" ? doc.colbert_scale : 1,
-              token_ids: Array.isArray((doc as any).doc_token_ids)
-                ? ((doc as any).doc_token_ids as number[])
-                : undefined,
-            })),
-            colbertDim,
-          },
-          signal,
-        )
-      : rerankCandidates.map((doc, idx) => {
-          // If rerank is disabled, fall back to fusion ordering with structural boost
-          const key = doc.id || `${doc.path}:${doc.chunk_index}`;
-          const fusedScore = candidateScores.get(key) ?? 0;
-          // Small tie-breaker so later items don't all share 0
-          return fusedScore || 1 / (idx + 1);
-        });
+    // Choose reranking method based on provider config
+    let scores: number[];
+    if (!doRerank) {
+      // If rerank is disabled, fall back to fusion ordering with structural boost
+      scores = rerankCandidates.map((doc, idx) => {
+        const key = doc.id || `${doc.path}:${doc.chunk_index}`;
+        const fusedScore = candidateScores.get(key) ?? 0;
+        // Small tie-breaker so later items don't all share 0
+        return fusedScore || 1 / (idx + 1);
+      });
+    } else if (PROVIDERS.rerank === "zeroentropy") {
+      // Use ZeroEntropy zerank-2 reranker directly (no worker pool overhead)
+      const zerankResult = await zerankRerank({
+        query,
+        docs: rerankCandidates.map((doc) => ({
+          text: doc.display_text || doc.content || "",
+        })),
+        topN: RERANK_TOP,
+      });
+      scores = zerankResult.scores;
+    } else {
+      // Use local ColBERT reranker
+      scores = await pool.rerank(
+        {
+          query: queryMatrixRaw,
+          docs: rerankCandidates.map((doc) => ({
+            colbert: (doc.colbert as Buffer | Int8Array | number[]) ?? [],
+            scale:
+              typeof doc.colbert_scale === "number" ? doc.colbert_scale : 1,
+            token_ids: Array.isArray((doc as any).doc_token_ids)
+              ? ((doc as any).doc_token_ids as number[])
+              : undefined,
+          })),
+          colbertDim,
+        },
+        signal,
+      );
+    }
 
     type ScoredItem = {
       record: (typeof rerankCandidates)[number];

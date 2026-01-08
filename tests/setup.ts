@@ -13,11 +13,12 @@ vi.mock("../src/lib/workers/pool", () => {
       colbertDim: CONFIG.COLBERT_DIM,
     })),
     rerank: vi.fn(async (_input: unknown) => []),
-    destroy: vi.fn(async () => {}),
+    rerankWithText: vi.fn(async (_input: unknown) => ({ scores: [] })),
+    destroy: vi.fn(async () => { }),
   };
   return {
     getWorkerPool: () => mockPool,
-    destroyWorkerPool: vi.fn(async () => {}),
+    destroyWorkerPool: vi.fn(async () => { }),
     isWorkerPoolInitialized: vi.fn(() => true),
   };
 });

@@ -7,8 +7,12 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { CONFIG, WORKER_TIMEOUT_MS } from "../../config";
 import type { ProcessFileInput, ProcessFileResult, RerankDoc } from "./worker";
+import type {
+  RerankWithTextInput,
+  RerankWithTextResult,
+} from "./rerankers/zerank";
 
-type TaskMethod = "processFile" | "encodeQuery" | "rerank";
+type TaskMethod = "processFile" | "encodeQuery" | "rerank" | "rerankWithText";
 
 type EncodeQueryResult = Awaited<
   ReturnType<typeof import("./worker")["encodeQuery"]>
@@ -19,12 +23,14 @@ type TaskPayloads = {
   processFile: ProcessFileInput;
   encodeQuery: { text: string };
   rerank: { query: number[][]; docs: RerankDoc[]; colbertDim: number };
+  rerankWithText: RerankWithTextInput;
 };
 
 type TaskResults = {
   processFile: ProcessFileResult;
   encodeQuery: EncodeQueryResult;
   rerank: RerankResult;
+  rerankWithText: RerankWithTextResult;
 };
 
 type WorkerMessage =
@@ -170,8 +176,7 @@ export class WorkerPool {
       this.clearTaskTimeout(task);
       task.reject(
         new Error(
-          `Worker exited unexpectedly${code ? ` (code ${code})` : ""}${
-            signal ? ` signal ${signal}` : ""
+          `Worker exited unexpectedly${code ? ` (code ${code})` : ""}${signal ? ` signal ${signal}` : ""
           }`,
         ),
       );
@@ -325,7 +330,7 @@ export class WorkerPool {
     worker.child.removeAllListeners("exit");
     try {
       worker.child.kill("SIGKILL");
-    } catch {}
+    } catch { }
 
     this.workers = this.workers.filter((w) => w !== worker);
     if (!this.destroyed) {
@@ -388,6 +393,10 @@ export class WorkerPool {
     return this.enqueue("rerank", input, signal);
   }
 
+  rerankWithText(input: RerankWithTextInput, signal?: AbortSignal) {
+    return this.enqueue("rerankWithText", input, signal);
+  }
+
   async destroy(): Promise<void> {
     if (this.destroyPromise) return this.destroyPromise;
     if (this.destroyed) return;
@@ -411,7 +420,7 @@ export class WorkerPool {
           const force = setTimeout(() => {
             try {
               w.child.kill("SIGKILL");
-            } catch {}
+            } catch { }
           }, FORCE_KILL_GRACE_MS);
           setTimeout(() => {
             clearTimeout(force);

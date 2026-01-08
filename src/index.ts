@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import "dotenv/config";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { program } from "commander";
