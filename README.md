@@ -4,16 +4,67 @@
 > - Added `.env` file support (dotenv) for API keys
 > - Added cloud provider support (OpenRouter for embeddings, ZeroEntropy for reranking)
 > - Created `.env.example` template
+> - Skips ~150MB model download when using cloud providers
+> - Fixed Windows compatibility (removed Unix-only build scripts)
 >
-> **Known limitations (hardcoded values in `src/config.ts`):**
-> - Models: `granite-embedding-30m-english` (local), `qwen/qwen3-embedding-8b` (cloud)
-> - Reranker: `mxbai-edge-colbert` (local), `zerank-2` (cloud)
-> - Max chunk size: 2000 chars / 75 lines
-> - Max file size: 2MB
+> **Known limitations:**
+> - `.env` loads from current working directory, not install location (see [Cloud Providers](#cloud-providers-optional))
+> - Models are hardcoded: `granite-embedding-30m-english` (local), `qwen/qwen3-embedding-8b` (cloud)
+> - Reranker hardcoded: `mxbai-edge-colbert` (local), `zerank-2` (cloud)
+> - Vector dimensions: 384 (local) / 4096 (cloud) - **switching models requires re-index**
+> - Max chunk: 2000 chars / 75 lines
+> - Max file: 2MB
 > - Worker threads: 4 (local) / 14 (cloud)
-> - Vector dimensions: 384 (local) / 4096 (cloud) - **changing models will break things**
 >
 > Feel free to grab it if you find it useful!
+>
+> ---
+>
+> ### Quick Install (This Fork)
+>
+> ```bash
+> # 1. Clone this repo
+> git clone https://github.com/YOUR_USERNAME/osgrep.git
+> cd osgrep
+>
+> # 2. Install dependencies
+> pnpm install
+>
+> # 3. Build
+> pnpm build
+>
+> # 4. Link globally (makes 'osgrep' command available everywhere)
+> npm link
+>
+> # 5. Set environment variables (pick one method):
+>
+> # Option A: Windows PowerShell (session only)
+> $env:OSGREP_EMBED_PROVIDER = "qwen"
+> $env:OSGREP_RERANK_PROVIDER = "zeroentropy"
+> $env:QWEN_API_KEY = "your-openrouter-key"
+> $env:ZEROENTROPY_API_KEY = "your-zeroentropy-key"
+>
+> # Option B: Linux/macOS (session only)
+> export OSGREP_EMBED_PROVIDER=qwen
+> export OSGREP_RERANK_PROVIDER=zeroentropy
+> export QWEN_API_KEY=your-openrouter-key
+> export ZEROENTROPY_API_KEY=your-zeroentropy-key
+>
+> # Option C: Use .env file (copy to EACH project where you'll use osgrep)
+> cp .env.example /path/to/your/project/.env
+> # Then edit the .env file with your keys
+>
+> # 6. Test it works
+> cd /path/to/any/project
+> osgrep "how does authentication work"
+>
+> # To unlink later:
+> npm unlink -g osgrep
+> ```
+>
+> **Get API keys:**
+> - OpenRouter: https://openrouter.ai/keys
+> - ZeroEntropy: https://zeroentropy.dev
 
 <div align="center">
   <h1>osgrep</h1>
@@ -302,37 +353,12 @@ Stores are isolated automatically — no manual `--store` flags needed!
 
 ### Cloud Providers (Optional)
 
-By default, osgrep runs 100% locally. For higher quality embeddings or reranking, you can use cloud providers.
-
-**Setup:**
-```bash
-cp .env.example .env
-# Edit .env with your API keys
-```
-
-**Available Providers:**
+By default, osgrep runs 100% locally. For higher quality embeddings or reranking, you can use cloud providers. See the [Quick Install](#quick-install-this-fork) section at the top for setup instructions.
 
 | Provider | Purpose | Environment Variables |
 | --- | --- | --- |
 | [OpenRouter](https://openrouter.ai/keys) | Cloud embeddings (Qwen) | `QWEN_API_KEY` |
 | [ZeroEntropy](https://zeroentropy.dev) | Cloud reranking | `ZEROENTROPY_API_KEY` |
-
-**Enable cloud providers:**
-```bash
-# In your .env file:
-OSGREP_EMBED_PROVIDER=qwen        # Use OpenRouter for embeddings
-OSGREP_RERANK_PROVIDER=zeroentropy # Use ZeroEntropy for reranking
-
-QWEN_API_KEY=your-openrouter-key
-ZEROENTROPY_API_KEY=your-zeroentropy-key
-```
-
-Or set environment variables directly:
-```bash
-export OSGREP_EMBED_PROVIDER=qwen
-export QWEN_API_KEY=your-key
-osgrep "query"
-```
 
 ### Ignoring Files
 

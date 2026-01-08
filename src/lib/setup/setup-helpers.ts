@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import ora from "ora";
-import { PATHS } from "../../config";
+import { PATHS, PROVIDERS } from "../../config";
 import { areModelsDownloaded, downloadModels } from "./model-loader";
 
 export interface SetupPaths {
@@ -56,7 +56,12 @@ export async function ensureSetup({
     throw error;
   }
 
-  const modelsPresent = areModelsDownloaded();
+  // Skip model downloads if using all cloud providers
+  const needsLocalEmbed = PROVIDERS.embed === "local";
+  const needsLocalRerank = PROVIDERS.rerank === "local";
+  const needsAnyLocalModels = needsLocalEmbed || needsLocalRerank;
+
+  const modelsPresent = !needsAnyLocalModels || areModelsDownloaded();
   let downloadedModels = false;
 
   if (!modelsPresent) {
@@ -71,6 +76,8 @@ export async function ensureSetup({
       modelSpinner?.fail("Failed to download models");
       throw error;
     }
+  } else if (!needsAnyLocalModels && !silent) {
+    console.log("Using cloud providers - skipping local model download");
   }
 
   return { ...paths, createdDirs, downloadedModels };
