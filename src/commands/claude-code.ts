@@ -6,6 +6,7 @@ function runClaudeCommand(args: string[]): Promise<void> {
     const child = spawn("claude", ["plugin", ...args], {
       env: process.env,
       stdio: "inherit",
+      shell: true,
     });
 
     child.on("error", (error) => reject(error));
