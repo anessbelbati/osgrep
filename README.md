@@ -2,7 +2,8 @@
 >
 > **What changed:**
 > - Added `.env` file support (dotenv) for API keys
-> - Added cloud provider support (OpenRouter for embeddings, ZeroEntropy for reranking)
+> - Added cloud provider support (OpenRouter for embeddings, and for reranking with TypeSafe's Jev)
+> - A search no longer fails when the reranking service is down: it warns and returns the results un-reranked
 > - Created `.env.example` template
 > - Skips ~150MB model download when using cloud providers
 > - Fixed Windows compatibility (removed Unix-only build scripts)
@@ -10,7 +11,8 @@
 > **Known limitations:**
 > - `.env` loads from current working directory, not install location (see [Cloud Providers](#cloud-providers-optional))
 > - Models are hardcoded: `granite-embedding-30m-english` (local), `qwen/qwen3-embedding-8b` (cloud)
-> - Reranker hardcoded: `mxbai-edge-colbert` (local), `zerank-2` (cloud)
+> - Reranker: `mxbai-edge-colbert` (local), `typesafe/jev-1.13-20260917` (cloud; a dated name, set `JEV_MODEL` when it is retired)
+> - ZeroEntropy's hosted `zerank-2` API was sunset in September 2026. `OSGREP_RERANK_PROVIDER=zeroentropy` now means Jev, unless `ZEROENTROPY_API_ENDPOINT` names a server of your own running the open weights
 > - Vector dimensions: 384 (local) / 4096 (cloud) - **switching models requires re-index**
 > - Max chunk: 2000 chars / 75 lines
 > - Max file: 2MB
@@ -40,15 +42,13 @@
 >
 > # Option A: Windows PowerShell (session only)
 > $env:OSGREP_EMBED_PROVIDER = "qwen"
-> $env:OSGREP_RERANK_PROVIDER = "zeroentropy"
+> $env:OSGREP_RERANK_PROVIDER = "jev"
 > $env:QWEN_API_KEY = "your-openrouter-key"
-> $env:ZEROENTROPY_API_KEY = "your-zeroentropy-key"
 >
 > # Option B: Linux/macOS (session only)
 > export OSGREP_EMBED_PROVIDER=qwen
-> export OSGREP_RERANK_PROVIDER=zeroentropy
+> export OSGREP_RERANK_PROVIDER=jev
 > export QWEN_API_KEY=your-openrouter-key
-> export ZEROENTROPY_API_KEY=your-zeroentropy-key
 >
 > # Option C: Use .env file (copy to EACH project where you'll use osgrep)
 > cp .env.example /path/to/your/project/.env
@@ -62,9 +62,8 @@
 > npm unlink -g osgrep
 > ```
 >
-> **Get API keys:**
-> - OpenRouter: https://openrouter.ai/keys
-> - ZeroEntropy: https://zeroentropy.dev
+> **Get an API key:**
+> - OpenRouter: https://openrouter.ai/keys (one key pays for both the embeddings and the reranking)
 
 <div align="center">
   <h1>osgrep</h1>
@@ -358,7 +357,10 @@ By default, osgrep runs 100% locally. For higher quality embeddings or reranking
 | Provider | Purpose | Environment Variables |
 | --- | --- | --- |
 | [OpenRouter](https://openrouter.ai/keys) | Cloud embeddings (Qwen) | `QWEN_API_KEY` |
-| [ZeroEntropy](https://zeroentropy.dev) | Cloud reranking | `ZEROENTROPY_API_KEY` |
+| [OpenRouter](https://openrouter.ai/keys) | Cloud reranking (TypeSafe's Jev) | `JEV_API_KEY`, or none: `OPENROUTER_API_KEY` and then `QWEN_API_KEY` are used |
+| Your own server | Cloud reranking (zerank-2, open weights) | `ZEROENTROPY_API_ENDPOINT`, `ZEROENTROPY_API_KEY` |
+
+Jev gets one request per search: the top candidates go in as passages, each with a four-level relevance question, and a candidate's score is the expected level. The wording is the one measured in [jev-rerank-bench](https://github.com/anessbelbati/jev-rerank-bench). If the reranking service cannot be reached, the search prints a warning and returns the results in vector + keyword order.
 
 ### Ignoring Files
 

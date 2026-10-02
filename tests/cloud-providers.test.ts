@@ -1,12 +1,13 @@
 /**
- * Tests for cloud providers (Qwen embeddings + ZeroEntropy reranker)
+ * Tests for cloud providers (Qwen embeddings + Jev and ZeroEntropy rerankers)
  *
  * These tests verify:
  * 1. Provider configuration works correctly
  * 2. Qwen embedding provider API calls
  * 3. ZeroEntropy zerank-2 reranker API calls
- * 4. Error handling for missing API keys
- * 5. Retry logic for network errors
+ * 4. Jev reranker API calls
+ * 5. Error handling for missing API keys
+ * 6. Retry logic for network errors
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -45,12 +46,30 @@ describe("Cloud Provider Configuration", () => {
         expect(PROVIDERS.embed).toBe("qwen");
     });
 
-    it("uses zeroentropy provider when OSGREP_RERANK_PROVIDER=zeroentropy", async () => {
+    it("uses jev provider when OSGREP_RERANK_PROVIDER=jev", async () => {
+        process.env.OSGREP_RERANK_PROVIDER = "jev";
+
+        const { PROVIDERS } = await import("../src/config");
+
+        expect(PROVIDERS.rerank).toBe("jev");
+    });
+
+    it("uses zeroentropy provider when it names an endpoint of its own", async () => {
         process.env.OSGREP_RERANK_PROVIDER = "zeroentropy";
+        process.env.ZEROENTROPY_API_ENDPOINT = "https://custom.zeroentropy/v1/models/rerank";
 
         const { PROVIDERS } = await import("../src/config");
 
         expect(PROVIDERS.rerank).toBe("zeroentropy");
+    });
+
+    it("sends zeroentropy to jev when it names no endpoint (the hosted API was sunset)", async () => {
+        process.env.OSGREP_RERANK_PROVIDER = "zeroentropy";
+        delete process.env.ZEROENTROPY_API_ENDPOINT;
+
+        const { PROVIDERS } = await import("../src/config");
+
+        expect(PROVIDERS.rerank).toBe("jev");
     });
 
     it("reads Qwen API config from env vars", async () => {
@@ -75,6 +94,55 @@ describe("Cloud Provider Configuration", () => {
         expect(CLOUD_API.zeroentropy.apiKey).toBe("ze-test-key");
         expect(CLOUD_API.zeroentropy.endpoint).toBe("https://custom.zeroentropy/v1/models/rerank");
         expect(CLOUD_API.zeroentropy.model).toBe("custom-reranker");
+    });
+
+    it("reads Jev API config from env vars", async () => {
+        process.env.JEV_API_KEY = "jev-test-key";
+        process.env.JEV_API_ENDPOINT = "https://custom.jev/v1/systemone";
+        process.env.JEV_MODEL = "custom-jev";
+
+        const { CLOUD_API } = await import("../src/config");
+
+        expect(CLOUD_API.jev.apiKey).toBe("jev-test-key");
+        expect(CLOUD_API.jev.endpoint).toBe("https://custom.jev/v1/systemone");
+        expect(CLOUD_API.jev.model).toBe("custom-jev");
+    });
+
+    it("pays for Jev on OpenRouter with the embeddings key when no other key is set", async () => {
+        delete process.env.JEV_API_KEY;
+        delete process.env.JEV_API_ENDPOINT;
+        delete process.env.OPENROUTER_API_KEY;
+        delete process.env.QWEN_API_ENDPOINT;
+        process.env.QWEN_API_KEY = "openrouter-key";
+
+        const { CLOUD_API } = await import("../src/config");
+
+        expect(CLOUD_API.jev.endpoint).toBe("https://openrouter.ai/api/v1/systemone");
+        expect(CLOUD_API.jev.apiKey).toBe("openrouter-key");
+    });
+
+    it("never sends an OpenRouter key to another Jev host", async () => {
+        delete process.env.JEV_API_KEY;
+        delete process.env.QWEN_API_ENDPOINT;
+        process.env.JEV_API_ENDPOINT = "https://custom.jev/v1/systemone";
+        process.env.OPENROUTER_API_KEY = "openrouter-key";
+        process.env.QWEN_API_KEY = "openrouter-key";
+
+        const { CLOUD_API } = await import("../src/config");
+
+        expect(CLOUD_API.jev.apiKey).toBe("");
+    });
+
+    it("does not take the embeddings key for Jev when the embeddings are not on OpenRouter", async () => {
+        delete process.env.JEV_API_KEY;
+        delete process.env.JEV_API_ENDPOINT;
+        delete process.env.OPENROUTER_API_KEY;
+        process.env.QWEN_API_ENDPOINT = "https://custom.endpoint/v1/embeddings";
+        process.env.QWEN_API_KEY = "other-key";
+
+        const { CLOUD_API } = await import("../src/config");
+
+        expect(CLOUD_API.jev.apiKey).toBe("");
     });
 });
 
@@ -355,6 +423,202 @@ describe("ZeroEntropy Reranker Provider", () => {
 
         const callBody = JSON.parse(mockFetch.mock.calls[0][1].body);
         expect(callBody.top_n).toBe(2);
+    });
+});
+
+describe("Jev Reranker Provider", () => {
+    const originalEnv = { ...process.env };
+
+    const RUBRIC = [
+        "The passage is off-topic for the query.",
+        "The passage is on a related topic but does not supply what the query asks for.",
+        "The passage partly supplies the information needed to answer or verify the query.",
+        "The passage fully supplies the information needed to answer or verify the query.",
+    ];
+
+    // A System One "score" answer: the probability Jev puts on each rubric level
+    const answer = (probabilities: number[]) => ({
+        type: "score",
+        legend: Object.fromEntries(RUBRIC.map((text, i) => [String(i), text])),
+        probabilities: Object.fromEntries(probabilities.map((p, i) => [String(i), p])),
+    });
+
+    beforeEach(() => {
+        vi.resetModules();
+        process.env.JEV_API_KEY = "test-jev-key";
+        delete process.env.JEV_API_ENDPOINT;
+        delete process.env.JEV_MODEL;
+        mockFetch.mockReset();
+    });
+
+    afterEach(() => {
+        process.env = { ...originalEnv };
+    });
+
+    it("throws error when API key is missing", async () => {
+        delete process.env.JEV_API_KEY;
+        delete process.env.OPENROUTER_API_KEY;
+        delete process.env.QWEN_API_KEY;
+
+        const { jevRerank } = await import("../src/lib/workers/rerankers/jev");
+
+        await expect(
+            jevRerank({
+                query: "test query",
+                docs: [{ text: "doc1" }],
+            })
+        ).rejects.toThrow("JEV_API_KEY environment variable is required");
+        expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it("scores each passage by its expected rubric level, in input order", async () => {
+        mockFetch.mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({
+                answers: {
+                    p02: answer([0, 0, 0, 1]),
+                    p01: answer([1, 0, 0, 0]),
+                    p03: answer([0, 0.5, 0.5, 0]),
+                },
+            }),
+        });
+
+        const { jevRerank } = await import("../src/lib/workers/rerankers/jev");
+
+        const result = await jevRerank({
+            query: "test query",
+            docs: [{ text: "doc0" }, { text: "doc1" }, { text: "doc2" }],
+        });
+
+        expect(result.scores).toHaveLength(3);
+        expect(result.scores[0]).toBeCloseTo(0, 5);
+        expect(result.scores[1]).toBeCloseTo(1, 5);
+        expect(result.scores[2]).toBeCloseTo(0.5, 5);
+        expect(mockFetch).toHaveBeenCalledWith(
+            expect.stringContaining("systemone"),
+            expect.objectContaining({
+                method: "POST",
+                headers: expect.objectContaining({
+                    Authorization: "Bearer test-jev-key",
+                }),
+            })
+        );
+    });
+
+    it("reads a level from the legend's wording, not from the name of its key", async () => {
+        mockFetch.mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({
+                answers: {
+                    p01: {
+                        type: "score",
+                        legend: { a: RUBRIC[3], b: RUBRIC[0], c: RUBRIC[2], d: RUBRIC[1] },
+                        probabilities: { a: 1, b: 0, c: 0, d: 0 },
+                    },
+                },
+            }),
+        });
+
+        const { jevRerank } = await import("../src/lib/workers/rerankers/jev");
+
+        const result = await jevRerank({ query: "test", docs: [{ text: "doc" }] });
+
+        expect(result.scores[0]).toBeCloseTo(1, 5);
+    });
+
+    it("sends every passage with a question of its own in one request", async () => {
+        mockFetch.mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({
+                answers: { p01: answer([1, 0, 0, 0]), p02: answer([1, 0, 0, 0]) },
+            }),
+        });
+
+        const { jevRerank } = await import("../src/lib/workers/rerankers/jev");
+
+        await jevRerank({
+            query: "where is auth checked",
+            docs: [{ text: "doc1" }, { text: "doc2" }],
+        });
+
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+        const callBody = JSON.parse(mockFetch.mock.calls[0][1].body);
+        expect(callBody.model).toBe("typesafe/jev-1.13-20260917");
+        expect(callBody.state).toEqual({
+            query: "where is auth checked",
+            passages: { p01: "doc1", p02: "doc2" },
+        });
+        expect(Object.keys(callBody.questions)).toEqual(["p01", "p02"]);
+        expect(callBody.questions.p02.type).toBe("score");
+        expect(callBody.questions.p02.instructions).toContain("passage p02");
+        expect(callBody.questions.p02.criteria).toEqual(RUBRIC);
+    });
+
+    it("returns empty scores for empty input", async () => {
+        const { jevRerank } = await import("../src/lib/workers/rerankers/jev");
+
+        const result = await jevRerank({
+            query: "test",
+            docs: [],
+        });
+
+        expect(result.scores).toEqual([]);
+        expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it("retries on rate limit (429)", async () => {
+        mockFetch
+            .mockResolvedValueOnce({
+                ok: false,
+                status: 429,
+                headers: new Map([["retry-after", "1"]]),
+                text: async () => "Rate limited",
+            })
+            .mockResolvedValueOnce({
+                ok: true,
+                json: async () => ({
+                    answers: { p01: answer([0, 0, 0, 1]) },
+                }),
+            });
+
+        const { jevRerank } = await import("../src/lib/workers/rerankers/jev");
+
+        const result = await jevRerank({
+            query: "test",
+            docs: [{ text: "doc" }],
+        });
+
+        expect(result.scores[0]).toBeCloseTo(1, 5);
+        expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
+    it("throws on API error", async () => {
+        mockFetch.mockResolvedValueOnce({
+            ok: false,
+            status: 500,
+            text: async () => "Internal Server Error",
+        });
+
+        const { jevRerank } = await import("../src/lib/workers/rerankers/jev");
+
+        await expect(
+            jevRerank({ query: "test", docs: [{ text: "doc" }] })
+        ).rejects.toThrow("Jev API error (500)");
+    });
+
+    it("throws when the reply leaves a passage without an answer", async () => {
+        mockFetch.mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({
+                answers: { p01: answer([0, 0, 0, 1]) },
+            }),
+        });
+
+        const { jevRerank } = await import("../src/lib/workers/rerankers/jev");
+
+        await expect(
+            jevRerank({ query: "test", docs: [{ text: "doc1" }, { text: "doc2" }] })
+        ).rejects.toThrow("no readable answer for passage p02");
     });
 });
 

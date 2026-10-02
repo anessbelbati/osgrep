@@ -8,21 +8,53 @@ export const MODEL_IDS = {
 
 // Provider types
 export type EmbedProvider = "local" | "qwen";
-export type RerankProvider = "local" | "zeroentropy";
+export type RerankProvider = "local" | "zeroentropy" | "jev";
+
+// ZeroEntropy's hosted API was sunset in September 2026 (zerank-2 lives on as
+// open weights). Asking for "zeroentropy" without naming a server of your own
+// (ZEROENTROPY_API_ENDPOINT) therefore gets Jev.
+function rerankProvider(): RerankProvider {
+  const asked = (process.env.OSGREP_RERANK_PROVIDER ||
+    "local") as RerankProvider;
+  if (asked === "zeroentropy" && !process.env.ZEROENTROPY_API_ENDPOINT) {
+    return "jev";
+  }
+  return asked;
+}
 
 // Provider configuration (read from env vars)
 export const PROVIDERS = {
   embed: (process.env.OSGREP_EMBED_PROVIDER || "local") as EmbedProvider,
-  rerank: (process.env.OSGREP_RERANK_PROVIDER || "local") as RerankProvider,
+  rerank: rerankProvider(),
 };
+
+const QWEN_ENDPOINT =
+  process.env.QWEN_API_ENDPOINT || "https://openrouter.ai/api/v1/embeddings";
+const JEV_ENDPOINT =
+  process.env.JEV_API_ENDPOINT || "https://openrouter.ai/api/v1/systemone";
+
+function isOpenRouter(url: string): boolean {
+  try {
+    return new URL(url).hostname === "openrouter.ai";
+  } catch {
+    return false;
+  }
+}
+
+// OpenRouter serves Jev, so an OpenRouter key already set for the embeddings
+// pays for it too. Such a key is only ever sent to openrouter.ai.
+function jevApiKey(): string {
+  if (process.env.JEV_API_KEY) return process.env.JEV_API_KEY;
+  if (!isOpenRouter(JEV_ENDPOINT)) return "";
+  if (process.env.OPENROUTER_API_KEY) return process.env.OPENROUTER_API_KEY;
+  return isOpenRouter(QWEN_ENDPOINT) ? process.env.QWEN_API_KEY || "" : "";
+}
 
 // Cloud API configuration
 export const CLOUD_API = {
   qwen: {
     apiKey: process.env.QWEN_API_KEY || "",
-    endpoint:
-      process.env.QWEN_API_ENDPOINT ||
-      "https://openrouter.ai/api/v1/embeddings",
+    endpoint: QWEN_ENDPOINT,
     model: process.env.QWEN_MODEL || "qwen/qwen3-embedding-8b",
   },
   zeroentropy: {
@@ -31,6 +63,11 @@ export const CLOUD_API = {
       process.env.ZEROENTROPY_API_ENDPOINT ||
       "https://api.zeroentropy.dev/v1/models/rerank",
     model: process.env.ZEROENTROPY_MODEL || "zerank-2",
+  },
+  jev: {
+    apiKey: jevApiKey(),
+    endpoint: JEV_ENDPOINT,
+    model: process.env.JEV_MODEL || "typesafe/jev-1.13-20260917",
   },
 };
 

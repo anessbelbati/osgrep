@@ -22,6 +22,7 @@ import { maxSim } from "./colbert-math";
 import { ColbertModel, type HybridResult } from "./embeddings/colbert";
 import { GraniteModel } from "./embeddings/granite";
 import { QwenModel } from "./embeddings/qwen";
+import { jevRerank } from "./rerankers/jev";
 import {
   zerankRerank,
   type RerankWithTextInput,
@@ -470,14 +471,13 @@ export class WorkerOrchestrator {
   }
 
   /**
-   * Rerank documents using text content (ZeroEntropy zerank-2)
+   * Rerank documents using text content (Jev or ZeroEntropy zerank-2)
    */
   async rerankWithText(input: RerankWithTextInput): Promise<RerankWithTextResult> {
-    if (PROVIDERS.rerank !== "zeroentropy") {
-      throw new Error(
-        "rerankWithText requires OSGREP_RERANK_PROVIDER=zeroentropy",
-      );
-    }
-    return zerankRerank(input);
+    if (PROVIDERS.rerank === "jev") return jevRerank(input);
+    if (PROVIDERS.rerank === "zeroentropy") return zerankRerank(input);
+    throw new Error(
+      "rerankWithText requires OSGREP_RERANK_PROVIDER=jev or zeroentropy",
+    );
   }
 }

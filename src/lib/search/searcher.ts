@@ -9,6 +9,7 @@ import type {
 import type { VectorDB } from "../store/vector-db";
 import { escapeSqlString, normalizePath } from "../utils/filter-builder";
 import { getWorkerPool } from "../workers/pool";
+import { jevRerank } from "../workers/rerankers/jev";
 import { zerankRerank } from "../workers/rerankers/zerank";
 import { detectIntent, type SearchIntent } from "./intent";
 
@@ -483,26 +484,39 @@ export class Searcher {
 
     const rerankCandidates = stage2Candidates.slice(0, RERANK_TOP);
 
-    // Choose reranking method based on provider config
-    let scores: number[];
-    if (!doRerank) {
-      // If rerank is disabled, fall back to fusion ordering with structural boost
-      scores = rerankCandidates.map((doc, idx) => {
+    // Fusion ordering with structural boost, for when no reranker scores the candidates
+    const fusionScores = () =>
+      rerankCandidates.map((doc, idx) => {
         const key = doc.id || `${doc.path}:${doc.chunk_index}`;
         const fusedScore = candidateScores.get(key) ?? 0;
         // Small tie-breaker so later items don't all share 0
         return fusedScore || 1 / (idx + 1);
       });
-    } else if (PROVIDERS.rerank === "zeroentropy") {
-      // Use ZeroEntropy zerank-2 reranker directly (no worker pool overhead)
-      const zerankResult = await zerankRerank({
-        query,
-        docs: rerankCandidates.map((doc) => ({
-          text: doc.display_text || doc.content || "",
-        })),
-        topN: RERANK_TOP,
-      });
-      scores = zerankResult.scores;
+
+    // Choose reranking method based on provider config
+    let scores: number[];
+    if (!doRerank) {
+      scores = fusionScores();
+    } else if (PROVIDERS.rerank === "jev" || PROVIDERS.rerank === "zeroentropy") {
+      // Cloud rerankers read the text and are called directly (no worker pool overhead)
+      const rerankText = PROVIDERS.rerank === "jev" ? jevRerank : zerankRerank;
+      try {
+        const reranked = await rerankText({
+          query,
+          docs: rerankCandidates.map((doc) => ({
+            text: doc.display_text || doc.content || "",
+          })),
+          topN: RERANK_TOP,
+        });
+        scores = reranked.scores;
+      } catch (e) {
+        // A reranking service that is down must not take the search down with it
+        const msg = e instanceof Error ? e.message : String(e);
+        console.warn(
+          `[Searcher] Reranking skipped, results are in vector + keyword order: ${msg}`,
+        );
+        scores = fusionScores();
+      }
     } else {
       // Use local ColBERT reranker
       scores = await pool.rerank(
